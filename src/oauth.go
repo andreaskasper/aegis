@@ -162,25 +162,34 @@ func (s *Server) tokenFromCode(w http.ResponseWriter, r *http.Request, cfg *Conf
 	redirectURI := r.PostForm.Get("redirect_uri")
 	verifier := r.PostForm.Get("code_verifier")
 
-	if code == "" || clientID == "" || redirectURI == "" || verifier == "" {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "missing required parameter")
+	// redirect_uri is deliberately not required. OAuth 2.0 asked for it here
+	// and plenty of current clients omit it; the code is already bound to the
+	// exact redirect_uri that was validated against the registration at
+	// /authorize time, so checking it again adds nothing when it is absent.
+	// When a client does send one, it still has to match.
+	if code == "" || clientID == "" || verifier == "" {
+		tokenFailed(w, clientID, "invalid_request", "missing required parameter", "code, client_id or code_verifier absent")
 		return
 	}
 	ac, ok := s.sessions.ConsumeCode(code)
 	if !ok {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code is invalid or expired")
+		tokenFailed(w, clientID, "invalid_grant", "authorization code is invalid or expired", "code unknown, expired or already used")
 		return
 	}
-	if !constantTimeEqual(ac.ClientID, clientID) || !constantTimeEqual(ac.RedirectURI, redirectURI) {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code does not match this client")
+	if !constantTimeEqual(ac.ClientID, clientID) {
+		tokenFailed(w, clientID, "invalid_grant", "authorization code does not match this client", "client_id mismatch")
+		return
+	}
+	if redirectURI != "" && !constantTimeEqual(ac.RedirectURI, redirectURI) {
+		tokenFailed(w, clientID, "invalid_grant", "authorization code does not match this client", "redirect_uri mismatch")
 		return
 	}
 	if !verifyPKCE(verifier, ac.CodeChallenge) {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+		tokenFailed(w, clientID, "invalid_grant", "PKCE verification failed", "code_verifier does not match the challenge")
 		return
 	}
 	if _, exists := cfg.Users[ac.User]; !exists {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "user no longer exists")
+		tokenFailed(w, clientID, "invalid_grant", "user no longer exists", "user removed from the configuration")
 		return
 	}
 
@@ -193,7 +202,7 @@ func (s *Server) tokenFromRefresh(w http.ResponseWriter, r *http.Request, cfg *C
 	token := r.PostForm.Get("refresh_token")
 	clientID := r.PostForm.Get("client_id")
 	if token == "" || clientID == "" {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "missing required parameter")
+		tokenFailed(w, clientID, "invalid_request", "missing required parameter", "refresh_token or client_id absent")
 		return
 	}
 	t, ok, reuse := s.sessions.RotateRefresh(token, clientID)
@@ -201,12 +210,13 @@ func (s *Server) tokenFromRefresh(w http.ResponseWriter, r *http.Request, cfg *C
 		logWarn("token_reuse_detected", map[string]any{"client_id": clientID})
 	}
 	if !ok {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "refresh token is invalid or expired")
+		tokenFailed(w, clientID, "invalid_grant", "refresh token is invalid or expired",
+			"refresh token unknown, expired or already rotated")
 		return
 	}
 	if _, exists := cfg.Users[t.User]; !exists {
 		s.sessions.KillFamily(t.Family)
-		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "user no longer exists")
+		tokenFailed(w, clientID, "invalid_grant", "user no longer exists", "user removed from the configuration")
 		return
 	}
 	access, refresh := s.sessions.IssueTokens(t.User, clientID, t.Family, cfg.TokenTTL)
@@ -240,6 +250,19 @@ func verifyPKCE(verifier, challenge string) bool {
 // ---------------------------------------------------------------------------
 // Error helpers
 // ---------------------------------------------------------------------------
+
+// tokenFailed answers the client and leaves a trace. A silent token endpoint
+// is miserable to debug: the operator sees a successful login and then
+// nothing at all, because the failure happens between the browser and the
+// client's backend.
+func tokenFailed(w http.ResponseWriter, clientID, code, desc, reason string) {
+	logWarn("token_failed", map[string]any{
+		"client_id": clientID,
+		"error":     code,
+		"reason":    reason,
+	})
+	writeOAuthError(w, http.StatusBadRequest, code, desc)
+}
 
 func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
 	w.Header().Set("Content-Type", "application/json")
