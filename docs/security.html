@@ -25,6 +25,7 @@
     <nav class="nav">
       <a href="index.html">Overview</a>
       <a href="docs.html">Docs</a>
+      <a href="deploy.html">Deployment</a>
       <a href="security.html" aria-current="page">Security</a>
       <a href="roadmap.html">Roadmap</a>
       <a href="https://github.com/andreaskasper/aegis">GitHub&nbsp;&rarr;</a>
@@ -96,6 +97,10 @@
       <div class="note warn">
         <strong>Secrets shorter than 8 bytes are not redacted.</strong> Below that the false-positive rate would corrupt legitimate response content. Aegis warns at startup naming each affected secret, but the gap is real: a short credential reflected by an upstream will reach the model. Use long credentials.
       </div>
+
+      <div class="note warn">
+        <strong>Per-IP rate limiting stops working behind a proxy.</strong> Aegis reads the client address from the TCP connection, so behind Traefik or Cloudflare every request appears to come from the proxy and the login limit becomes global. See <a href="deploy.html#client-ip">the client IP problem</a> in the deployment guide.
+      </div>
     </section>
 
     <section id="ssrf">
@@ -153,7 +158,7 @@
     <section id="hardening">
       <h2>Hardening the deployment</h2>
       <ul>
-        <li><strong>Terminate TLS in front.</strong> Aegis speaks plain HTTP by design.</li>
+        <li><strong>Terminate TLS in front.</strong> Aegis speaks plain HTTP by design. The <a href="deploy.html">deployment guide</a> has working setups for Traefik and Cloudflare.</li>
         <li><strong>Run the container read-only</strong> with <code>--read-only --cap-drop ALL --security-opt no-new-privileges</code>. Aegis never writes to disk, so nothing breaks.</li>
         <li><strong>Keep the config out of git</strong> unless every value is an <code>env:</code> or <code>file:</code> reference. The shipped <code>.gitignore</code> already excludes <code>config.yaml</code>.</li>
         <li><strong>Prefer <code>file:</code> references</strong> to real Docker or Podman secrets over inline values.</li>
@@ -188,6 +193,7 @@ go test -race ./...</pre>
     <nav class="foot-links">
       <a href="index.html">Overview</a>
       <a href="docs.html">Docs</a>
+      <a href="deploy.html">Deployment</a>
       <a href="roadmap.html">Roadmap</a>
       <a href="https://github.com/andreaskasper/aegis">GitHub</a>
     </nav>

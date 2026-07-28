@@ -25,6 +25,7 @@
     <nav class="nav">
       <a href="index.html">Overview</a>
       <a href="docs.html">Docs</a>
+      <a href="deploy.html">Deployment</a>
       <a href="security.html">Security</a>
       <a href="roadmap.html" aria-current="page">Roadmap</a>
       <a href="https://github.com/andreaskasper/aegis">GitHub&nbsp;&rarr;</a>
@@ -85,6 +86,10 @@
         <table>
           <thead><tr><th>Idea</th><th>Why it might be worth it</th></tr></thead>
           <tbody>
+            <tr>
+              <td>Trusted proxies for the client IP</td>
+              <td>Behind Traefik or Cloudflare, per-IP rate limiting collapses into a single bucket. A configured list of proxy addresses whose <code>X-Forwarded-For</code> may be believed would fix it. See <a href="deploy.html#client-ip">the client IP problem</a>.</td>
+            </tr>
             <tr>
               <td>Response filters per target</td>
               <td>Allow-listed JSON paths, so only the part of a response the agent needs reaches the context. Shrinks both the token bill and the exfiltration surface &mdash; at the cost of maintaining a filter per endpoint.</td>
@@ -187,6 +192,7 @@ go run . validate ../config.example.yaml</pre>
     <nav class="foot-links">
       <a href="index.html">Overview</a>
       <a href="docs.html">Docs</a>
+      <a href="deploy.html">Deployment</a>
       <a href="security.html">Security</a>
       <a href="https://github.com/andreaskasper/aegis">GitHub</a>
     </nav>
