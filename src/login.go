@@ -1,0 +1,259 @@
+package main
+
+import (
+	"html/template"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+// dummyHash is compared against when the username is unknown, so that a
+// wrong username and a wrong password cost the same. Without this, response
+// timing enumerates valid usernames.
+var dummyHash = []byte("$2a$12$C6UzMDM.H6dfI/f/IKcEe.7Ll2Nz9UhtLBW0Ap0hqUEP3IsWQ0eLW")
+
+// VerifyPassword checks a candidate against a user, in constant time where it
+// matters. A nil user still performs the work.
+func VerifyPassword(u *User, candidate string) bool {
+	if u == nil {
+		bcrypt.CompareHashAndPassword(dummyHash, []byte(candidate))
+		return false
+	}
+	if u.PasswordIsHash {
+		return bcrypt.CompareHashAndPassword(u.Password, []byte(candidate)) == nil
+	}
+	return constantTimeEqual(string(u.Password), candidate)
+}
+
+// ---------------------------------------------------------------------------
+// Authorization endpoint
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.authorizeForm(w, r)
+	case http.MethodPost:
+		s.authorizeSubmit(w, r)
+	default:
+		writeHTTPError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) authorizeForm(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	clientID := q.Get("client_id")
+	redirectURI := q.Get("redirect_uri")
+
+	// Client and redirect_uri are validated before anything is echoed back,
+	// and failures here render a page rather than redirecting - redirecting
+	// to an unverified URI is how open redirectors are built.
+	c := s.sessions.Client(clientID)
+	if c == nil {
+		renderError(w, http.StatusBadRequest, "Unknown client. Register with this server before authorizing.")
+		return
+	}
+	if redirectURI == "" || !c.AllowsRedirect(redirectURI) {
+		renderError(w, http.StatusBadRequest, "The redirect URI does not match this client's registration.")
+		return
+	}
+	if q.Get("response_type") != "code" {
+		redirectWithError(w, r, redirectURI, q.Get("state"), "unsupported_response_type", "only response_type=code is supported")
+		return
+	}
+	if q.Get("code_challenge_method") != "S256" || q.Get("code_challenge") == "" {
+		redirectWithError(w, r, redirectURI, q.Get("state"), "invalid_request", "PKCE with S256 is required")
+		return
+	}
+
+	csrf := s.sessions.NewCSRF(clientID, redirectURI, q.Get("state"), q.Get("code_challenge"))
+	renderLogin(w, http.StatusOK, loginView{
+		ClientName:  c.Name,
+		ClientID:    clientID,
+		RedirectURI: redirectURI,
+		CSRF:        csrf,
+	})
+}
+
+func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		renderError(w, http.StatusBadRequest, "Malformed form submission.")
+		return
+	}
+	clientID := r.PostForm.Get("client_id")
+	redirectURI := r.PostForm.Get("redirect_uri")
+	csrf := r.PostForm.Get("csrf")
+
+	entry, ok := s.sessions.ConsumeCSRF(csrf, clientID, redirectURI)
+	if !ok {
+		renderError(w, http.StatusBadRequest, "This login form has expired. Start the authorization again.")
+		return
+	}
+	c := s.sessions.Client(clientID)
+	if c == nil || !c.AllowsRedirect(redirectURI) {
+		renderError(w, http.StatusBadRequest, "Unknown client or redirect URI.")
+		return
+	}
+
+	ip := clientIP(r)
+	if ok, _ := s.loginLimiter.Allow(ip); !ok {
+		logWarn("login_failed", map[string]any{"reason": "rate_limited", "ip": ip})
+		renderLogin(w, http.StatusTooManyRequests, loginView{
+			ClientName:  c.Name,
+			ClientID:    clientID,
+			RedirectURI: redirectURI,
+			CSRF:        s.sessions.NewCSRF(clientID, redirectURI, entry.state, entry.challenge),
+			Error:       "Too many attempts. Try again shortly.",
+		})
+		return
+	}
+
+	cfg := s.Config()
+	username := strings.TrimSpace(r.PostForm.Get("username"))
+	password := r.PostForm.Get("password")
+	user := cfg.Users[username]
+
+	if !VerifyPassword(user, password) {
+		logWarn("login_failed", map[string]any{"ip": ip, "client_id": clientID})
+		renderLogin(w, http.StatusUnauthorized, loginView{
+			ClientName:  c.Name,
+			ClientID:    clientID,
+			RedirectURI: redirectURI,
+			CSRF:        s.sessions.NewCSRF(clientID, redirectURI, entry.state, entry.challenge),
+			Error:       "Invalid username or password.",
+		})
+		return
+	}
+
+	code := s.sessions.NewCode(user.Name, clientID, redirectURI, entry.challenge, cfg.CodeTTL)
+	logInfo("login_success", map[string]any{"user": user.Name, "client_id": clientID, "ip": ip})
+
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		renderError(w, http.StatusBadRequest, "Invalid redirect URI.")
+		return
+	}
+	q := u.Query()
+	q.Set("code", code)
+	if entry.state != "" {
+		q.Set("state", entry.state)
+	}
+	u.RawQuery = q.Encode()
+
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
+func redirectWithError(w http.ResponseWriter, r *http.Request, redirectURI, state, code, desc string) {
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		renderError(w, http.StatusBadRequest, "Invalid redirect URI.")
+		return
+	}
+	q := u.Query()
+	q.Set("error", code)
+	q.Set("error_description", desc)
+	if state != "" {
+		q.Set("state", state)
+	}
+	u.RawQuery = q.Encode()
+	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
+// ---------------------------------------------------------------------------
+// Views
+// ---------------------------------------------------------------------------
+
+type loginView struct {
+	ClientName  string
+	ClientID    string
+	RedirectURI string
+	CSRF        string
+	Error       string
+}
+
+func securityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+}
+
+func renderLogin(w http.ResponseWriter, status int, v loginView) {
+	securityHeaders(w)
+	w.WriteHeader(status)
+	loginTemplate.Execute(w, v)
+}
+
+func renderError(w http.ResponseWriter, status int, msg string) {
+	securityHeaders(w)
+	w.WriteHeader(status)
+	errorTemplate.Execute(w, msg)
+}
+
+const pageCSS = `
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background:#f5f6f8; color:#16181d; padding:24px; }
+.card { width:100%; max-width:380px; background:#fff; border:1px solid #e3e5e9;
+  border-radius:12px; padding:32px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+h1 { margin:0 0 4px; font-size:20px; letter-spacing:-.01em; }
+.sub { margin:0 0 24px; color:#6b7280; font-size:13px; }
+label { display:block; font-size:13px; font-weight:500; margin:0 0 6px; }
+input { width:100%; padding:10px 12px; margin:0 0 16px; border:1px solid #d4d7dd;
+  border-radius:8px; font-size:15px; background:#fff; color:inherit; }
+input:focus { outline:2px solid #2563eb; outline-offset:-1px; border-color:transparent; }
+button { width:100%; padding:11px; border:0; border-radius:8px; background:#16181d;
+  color:#fff; font-size:15px; font-weight:500; cursor:pointer; }
+button:hover { background:#2d3139; }
+.err { background:#fef2f2; border:1px solid #fecaca; color:#991b1b;
+  padding:10px 12px; border-radius:8px; margin:0 0 20px; font-size:13px; }
+.foot { margin:24px 0 0; padding-top:16px; border-top:1px solid #eceef1;
+  color:#9aa0aa; font-size:12px; text-align:center; }
+@media (prefers-color-scheme: dark) {
+  body { background:#0e0f12; color:#e6e8eb; }
+  .card { background:#17191d; border-color:#26282e; box-shadow:none; }
+  input { background:#0e0f12; border-color:#33363d; }
+  button { background:#e6e8eb; color:#0e0f12; }
+  button:hover { background:#fff; }
+  .err { background:#2a1416; border-color:#5c2226; color:#fca5a5; }
+  .foot { border-color:#26282e; }
+}
+`
+
+var loginTemplate = template.Must(template.New("login").Parse(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in - aegis</title><style>` + pageCSS + `</style></head>
+<body><main class="card">
+<h1>&#128737; aegis</h1>
+<p class="sub">{{if .ClientName}}<strong>{{.ClientName}}</strong> is requesting access on your behalf.{{else}}Sign in to continue.{{end}}</p>
+{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+<form method="post" action="/authorize" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="client_id" value="{{.ClientID}}">
+  <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
+  <label for="u">Username</label>
+  <input id="u" name="username" autocapitalize="off" autocorrect="off" spellcheck="false" autofocus required>
+  <label for="p">Password</label>
+  <input id="p" name="password" type="password" required>
+  <button type="submit">Sign in</button>
+</form>
+<p class="foot">Your credentials are never shared with the client.</p>
+</main></body></html>`))
+
+var errorTemplate = template.Must(template.New("error").Parse(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Error - aegis</title><style>` + pageCSS + `</style></head>
+<body><main class="card">
+<h1>&#128737; aegis</h1>
+<p class="sub">Authorization could not continue.</p>
+<div class="err">{{.}}</div>
+</main></body></html>`))
