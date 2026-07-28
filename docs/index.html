@@ -31,6 +31,7 @@
     <nav class="nav">
       <a href="index.html" aria-current="page">Overview</a>
       <a href="docs.html">Docs</a>
+      <a href="deploy.html">Deployment</a>
       <a href="security.html">Security</a>
       <a href="roadmap.html">Roadmap</a>
       <a href="https://github.com/andreaskasper/aegis">GitHub&nbsp;&rarr;</a>
@@ -281,11 +282,12 @@ docker run --rm -v "$PWD/config.yaml:/etc/aegis/config.yaml:ro" \
     </div>
 
     <div class="note warn">
-      <strong>Put it behind TLS.</strong> Aegis speaks plain HTTP and does not terminate TLS &mdash; that belongs in front of the container, in Traefik, Caddy, nginx or Cloudflare.
+      <strong>Put it behind TLS.</strong> Aegis speaks plain HTTP and does not terminate TLS &mdash; that belongs in front of the container. The <a href="deploy.html">deployment guide</a> has working Compose setups for Traefik with Let's Encrypt, for a Cloudflare Tunnel, and for Cloudflare's proxy in front of Traefik.
     </div>
 
     <div class="cta-row" style="justify-content:flex-start;margin-top:34px">
       <a class="btn btn-primary" href="docs.html">Read the docs</a>
+      <a class="btn btn-ghost" href="deploy.html">Deployment guide</a>
       <a class="btn btn-ghost" href="security.html">Threat model</a>
     </div>
   </div>
@@ -298,6 +300,7 @@ docker run --rm -v "$PWD/config.yaml:/etc/aegis/config.yaml:ro" \
     <div>&copy; <span data-year>2026</span> <a href="https://github.com/andreaskasper">Andreas Kasper</a> &middot; MIT licensed</div>
     <nav class="foot-links">
       <a href="docs.html">Docs</a>
+      <a href="deploy.html">Deployment</a>
       <a href="security.html">Security</a>
       <a href="roadmap.html">Roadmap</a>
       <a href="https://github.com/andreaskasper/aegis">GitHub</a>
