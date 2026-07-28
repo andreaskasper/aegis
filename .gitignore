@@ -1,0 +1,20 @@
+# Never commit a real configuration: it holds credentials.
+config.yaml
+*.local.yaml
+.env
+
+# Build output
+/aegis
+/src/aegis
+*.exe
+dist/
+
+# Go
+*.test
+*.out
+coverage.txt
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,90 @@
+# aegis - example configuration
+#
+# Copy to config.yaml and mount it read-only at /etc/aegis/config.yaml.
+# Everything in here is a secret store: keep it out of version control unless
+# every value is an env: or file: reference.
+#
+# Validate before deploying:
+#   docker run --rm -v "$PWD/config.yaml:/etc/aegis/config.yaml:ro" \
+#     ghcr.io/andreaskasper/aegis validate
+
+server:
+  listen: ":2019"
+
+  # The URL clients reach aegis on. Required - OAuth redirect URIs are derived
+  # from it. May also be set with AEGIS_PUBLIC_URL.
+  public_url: "https://aegis.example.com"
+
+  # Responses larger than this are truncated before reaching the model.
+  max_response_bytes: 1048576   # 1 MiB
+
+  request_timeout: "30s"
+  token_ttl: "12h"
+  code_ttl: "60s"
+  login_rate_limit: "10/m"      # per source IP
+
+users:
+  # -------------------------------------------------------------------------
+  # A normal user: may reach exactly the targets listed below, nothing else.
+  # -------------------------------------------------------------------------
+  - name: andreas
+
+    # Either a literal password or a bcrypt hash. Generate one with:
+    #   docker run --rm -it ghcr.io/andreaskasper/aegis hashpw
+    password: "bcrypt:$2a$12$REPLACE.THIS.WITH.A.REAL.HASH.xxxxxxxxxxxxxxxxxxxxxx"
+
+    # Values may be literal, or env:NAME, or file:/path (Docker secrets).
+    # Anything shorter than 8 characters cannot be redacted from responses and
+    # will be flagged with a warning at startup.
+    secrets:
+      lexware_token: "env:LEXWARE_TOKEN"
+      github_pat: "file:/run/secrets/github_pat"
+      weather_key: "env:OPENWEATHER_KEY"
+
+    targets:
+      # Read and write, but only under /v1.
+      - id: lexware
+        description: "Lexware Office accounting API - invoices, contacts, vouchers"
+        base_url: "https://api.lexware.io"
+        methods: [GET, POST]
+        paths: ["/v1/**"]
+        rate_limit: "60/m"
+        inject:
+          headers:
+            Authorization: "Bearer ${lexware_token}"
+            Accept: "application/json"
+
+      # Read-only, and only my own repositories.
+      - id: github
+        description: "GitHub REST API, read-only, own repositories"
+        base_url: "https://api.github.com"
+        methods: [GET]
+        paths:
+          - "/repos/andreaskasper/**"
+          - "/user"
+          - "/user/repos"
+        rate_limit: "120/m"
+        inject:
+          headers:
+            Authorization: "Bearer ${github_pat}"
+            Accept: "application/vnd.github+json"
+
+      # A credential that travels in the query string instead of a header.
+      - id: weather
+        description: "OpenWeatherMap current conditions and forecast"
+        base_url: "https://api.openweathermap.org"
+        methods: [GET]
+        paths: ["/data/2.5/**"]
+        rate_limit: "60/m"
+        inject:
+          query:
+            appid: "${weather_key}"
+
+  # -------------------------------------------------------------------------
+  # A user that may also fetch arbitrary public URLs. Private ranges, loopback
+  # and cloud metadata addresses stay blocked, and no credentials are attached
+  # to requests outside a configured target.
+  # -------------------------------------------------------------------------
+  - name: research
+    password: "env:RESEARCH_PASSWORD"
+    allow_any: true

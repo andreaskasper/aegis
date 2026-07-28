@@ -1,0 +1,41 @@
+services:
+  aegis:
+    build:
+      context: .
+      args:
+        VERSION: dev
+    image: ghcr.io/andreaskasper/aegis:latest
+    container_name: aegis
+    restart: unless-stopped
+
+    ports:
+      - "2019:2019"
+
+    environment:
+      AEGIS_PUBLIC_URL: ${AEGIS_PUBLIC_URL:-http://localhost:2019}
+      AEGIS_LOG_LEVEL: ${AEGIS_LOG_LEVEL:-info}
+      # Secrets referenced as env: in config.yaml
+      LEXWARE_TOKEN: ${LEXWARE_TOKEN:-}
+      OPENWEATHER_KEY: ${OPENWEATHER_KEY:-}
+
+    volumes:
+      - ./config.yaml:/etc/aegis/config.yaml:ro
+
+    # aegis never writes to disk, so it can run fully locked down.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      test: ["CMD", "/aegis", "version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
