@@ -24,13 +24,14 @@ type rawConfig struct {
 }
 
 type rawServer struct {
-	Listen           string `yaml:"listen"`
-	PublicURL        string `yaml:"public_url"`
-	MaxResponseBytes int64  `yaml:"max_response_bytes"`
-	RequestTimeout   string `yaml:"request_timeout"`
-	TokenTTL         string `yaml:"token_ttl"`
-	CodeTTL          string `yaml:"code_ttl"`
-	LoginRateLimit   string `yaml:"login_rate_limit"`
+	Listen           string   `yaml:"listen"`
+	PublicURL        string   `yaml:"public_url"`
+	MaxResponseBytes int64    `yaml:"max_response_bytes"`
+	RequestTimeout   string   `yaml:"request_timeout"`
+	TokenTTL         string   `yaml:"token_ttl"`
+	CodeTTL          string   `yaml:"code_ttl"`
+	LoginRateLimit   string   `yaml:"login_rate_limit"`
+	AllowedOrigins   []string `yaml:"allowed_origins"`
 }
 
 type rawUser struct {
@@ -73,6 +74,12 @@ type Config struct {
 	TokenTTL         time.Duration
 	CodeTTL          time.Duration
 	LoginRateLimit   Rate
+
+	// AllowedOrigins, when non-empty, restricts which browser Origins may
+	// call /mcp. Empty means no Origin restriction: /mcp is bearer-protected,
+	// and refusing foreign Origins on a public host breaks hosted MCP clients
+	// without buying much.
+	AllowedOrigins []string
 
 	Users map[string]*User // keyed by name
 }
@@ -214,6 +221,22 @@ func ParseConfig(data []byte) (*Config, error) {
 		fail("server.login_rate_limit: %v", err)
 	} else {
 		cfg.LoginRateLimit = r
+	}
+
+	// --- allowed origins ----------------------------------------------
+	for _, o := range raw.Server.AllowedOrigins {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			continue
+		}
+		if o != "*" {
+			u, err := url.Parse(o)
+			if err != nil || u.Scheme == "" || u.Host == "" || u.Path != "" {
+				fail("server.allowed_origins: %q is not an origin like https://example.com", o)
+				continue
+			}
+		}
+		cfg.AllowedOrigins = append(cfg.AllowedOrigins, o)
 	}
 
 	// --- users --------------------------------------------------------
