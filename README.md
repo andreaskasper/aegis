@@ -4,11 +4,6 @@ A secrets firewall for LLM agents. Aegis is an **MCP server** that lets a model
 make HTTP requests to your APIs — without ever letting it see the credentials
 those requests are authenticated with.
 
-> **Status: in development.** This README is written spec-first: it describes
-> the intended behaviour of v1. The Go implementation follows. See
-> [`spezifikation.md`](spezifikation.md) for the full technical specification
-> and [`projektbeschreibung.md`](projektbeschreibung.md) for the reasoning
-> behind the design.
 
 ### Status & Stats
 
