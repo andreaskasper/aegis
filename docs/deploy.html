@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deployment &mdash; aegis</title>
+<meta name="description" content="Running aegis behind Traefik with Let's Encrypt, behind a Cloudflare Tunnel, or behind Cloudflare's proxy in front of Traefik - with the caveats that matter.">
+<link rel="icon" href="logo.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="index.html"><img src="logo.png" alt=""> aegis</a>
+    <div class="header-actions">
+      <button class="icon-btn nav-toggle" type="button" aria-expanded="false" aria-label="Menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+      <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme">
+        <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+    </div>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <a href="docs.html">Docs</a>
+      <a href="deploy.html" aria-current="page">Deployment</a>
+      <a href="security.html">Security</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="https://github.com/andreaskasper/aegis">GitHub&nbsp;&rarr;</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap doc-layout">
+
+  <aside class="toc">
+    <strong>On this page</strong>
+    <a href="#rules">Three rules first</a>
+    <a href="#traefik">Traefik + Let's Encrypt</a>
+    <a href="#tunnel">Cloudflare Tunnel</a>
+    <a href="#cf-traefik">Cloudflare + Traefik</a>
+    <a href="#client-ip">The client IP problem</a>
+    <a href="#access">Cloudflare Access</a>
+    <a href="#timeouts">Timeouts and SSE</a>
+    <a href="#secrets">Getting secrets in</a>
+    <a href="#updates">Updates</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </aside>
+
+  <div class="doc-body">
+
+    <section id="rules">
+      <h1 style="font-size:clamp(1.9rem,4vw,2.6rem)">Deployment</h1>
+      <p class="lede">Aegis speaks plain HTTP on port 2019 and never terminates TLS. Something has to sit in front of it. Here are three setups that work, and the details that bite.</p>
+
+      <p>Ready-to-run files for all of this live in <a href="https://github.com/andreaskasper/aegis/tree/main/deploy">deploy/</a> in the repository.</p>
+
+      <h2>Three rules first</h2>
+
+      <h3>1. <code>public_url</code> is the contract</h3>
+      <p>Every OAuth redirect URI, the discovery documents and the <code>WWW-Authenticate</code> challenge are derived from <code>public_url</code>. It must be the URL the <em>client</em> uses, including <code>https://</code> &mdash; not the container name, not the internal address, not the IP.</p>
+      <p>Get this wrong and the symptom is confusing: the login page appears, you sign in, and the client then fails to exchange the code, because it was told to talk to a host it cannot reach.</p>
+
+      <h3>2. Never publish port 2019</h3>
+      <p>In every example below, the aegis service has no <code>ports:</code> section. Only the proxy reaches it, over the internal Docker network. Publishing 2019 on the host means a plaintext OAuth endpoint on the open internet, and browsers will send passwords to it.</p>
+
+      <h3>3. Aegis trusts nothing from the proxy</h3>
+      <p>It ignores <code>X-Forwarded-Proto</code>, <code>X-Forwarded-Host</code> and friends, and builds every URL from <code>public_url</code> instead. That makes it immune to header spoofing and means it needs no configuration to sit behind a proxy &mdash; with one consequence you should read: <a href="#client-ip">the client IP problem</a>.</p>
+    </section>
+
+    <section id="traefik">
+      <h2>Traefik with Let's Encrypt</h2>
+      <p>The standard case on your own server. Traefik terminates TLS, gets certificates automatically, and routes to aegis over the internal network.</p>
+
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">deploy/traefik/docker-compose.yml</span></div>
+<pre data-lang="yaml">name: aegis
+
+services:
+  traefik:
+    image: traefik:v3.3
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.tlschallenge=true
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+    networks: [edge]
+
+  aegis:
+    image: ghcr.io/andreaskasper/aegis:latest
+    restart: unless-stopped
+    environment:
+      AEGIS_PUBLIC_URL: https://${AEGIS_HOST}
+    volumes:
+      - ./config.yaml:/etc/aegis/config.yaml:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [edge]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.aegis.rule: "Host(`${AEGIS_HOST}`)"
+      traefik.http.routers.aegis.entrypoints: websecure
+      traefik.http.routers.aegis.tls.certresolver: le
+      traefik.http.services.aegis.loadbalancer.server.port: "2019"
+      traefik.http.services.aegis.loadbalancer.healthcheck.path: /healthz
+      traefik.http.services.aegis.loadbalancer.healthcheck.interval: 30s
+
+networks:
+  edge:
+
+volumes:
+  letsencrypt:</pre>
+      </div>
+
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">.env</span></div>
+<pre data-lang="shell">AEGIS_HOST=aegis.example.com
+ACME_EMAIL=you@example.com</pre>
+      </div>
+
+      <p>Then:</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">shell</span></div>
+<pre data-lang="shell">cp ../../config.example.yaml config.yaml   # and edit it
+docker compose up -d
+curl https://aegis.example.com/healthz</pre>
+      </div>
+
+      <div class="note">
+        <strong>Test against the staging CA first.</strong> Let's Encrypt rate-limits failed attempts hard. Add
+        <code>--certificatesresolvers.le.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory</code>
+        while you are getting DNS and labels right, then remove it and delete the <code>letsencrypt</code> volume once.
+      </div>
+
+      <p>The Docker socket is mounted read-only. Traefik only needs to watch container labels; write access to that socket is equivalent to root on the host.</p>
+    </section>
+
+    <section id="tunnel">
+      <h2>Cloudflare Tunnel</h2>
+      <p>Nothing listens on the host at all. <code>cloudflared</code> opens an outbound connection to Cloudflare and requests arrive through it. No open port, no firewall exception, no certificate on the server. For a container that holds credentials, this is the smallest attack surface of the three.</p>
+
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">deploy/cloudflared/docker-compose.yml</span></div>
+<pre data-lang="yaml">name: aegis
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    networks: [internal]
+    depends_on: [aegis]
+    read_only: true
+    cap_drop: [ALL]
+
+  aegis:
+    image: ghcr.io/andreaskasper/aegis:latest
+    restart: unless-stopped
+    environment:
+      AEGIS_PUBLIC_URL: https://${AEGIS_HOST}
+    volumes:
+      - ./config.yaml:/etc/aegis/config.yaml:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    networks: [internal]
+
+networks:
+  internal:</pre>
+      </div>
+
+      <p>In the Zero Trust dashboard, under <em>Networks &rarr; Tunnels &rarr; your tunnel &rarr; Public hostname</em>:</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Field</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td>Subdomain / domain</td><td><code>aegis</code> / <code>example.com</code></td></tr>
+            <tr><td>Service type</td><td><code>HTTP</code></td></tr>
+            <tr><td>URL</td><td><code>aegis:2019</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p><code>aegis</code> is the compose service name; cloudflared resolves it over the internal Docker network. <code>HTTP</code> is correct here &mdash; that hop never leaves Docker, and TLS is terminated by Cloudflare at the edge.</p>
+
+      <div class="note warn">
+        <strong>The tunnel token is a credential.</strong> Anyone holding it can attach a connector to your tunnel. Keep it in <code>.env</code> with the file mode tightened, or hand it to the container as a Docker secret, and keep <code>.env</code> out of git.
+      </div>
+
+      <p>Do not set <code>internal: true</code> on the network. That would also cut off aegis's own outbound requests to the APIs you configured, which is the entire point of the service.</p>
+    </section>
+
+    <section id="cf-traefik">
+      <h2>Cloudflare's proxy in front of Traefik</h2>
+      <p>The classic combination: the orange cloud at Cloudflare, your own server with Traefik and Let's Encrypt behind it. The compose file is the one from the <a href="#traefik">Traefik section</a> &mdash; what changes is the surrounding configuration.</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>SSL/TLS mode</td>
+              <td><strong>Full (strict)</strong></td>
+              <td>Anything less lets Cloudflare talk to your origin over plaintext or an unverified certificate. With Let's Encrypt on Traefik, strict works out of the box.</td>
+            </tr>
+            <tr>
+              <td>DNS record</td>
+              <td>Proxied (orange)</td>
+              <td>If it is grey, you are in the plain Traefik setup and none of this applies.</td>
+            </tr>
+            <tr>
+              <td>ACME challenge</td>
+              <td>TLS-ALPN will fail</td>
+              <td>Cloudflare's proxy terminates TLS, so the TLS-ALPN challenge never reaches Traefik. Use the DNS-01 challenge, or issue the certificate once with the record set to grey and switch it back.</td>
+            </tr>
+            <tr>
+              <td>Caching</td>
+              <td>Leave default</td>
+              <td>Aegis sends <code>Cache-Control: no-store</code> on everything that matters. The discovery documents are deliberately cacheable for five minutes.</td>
+            </tr>
+            <tr>
+              <td>Cloudflare Access</td>
+              <td>See below</td>
+              <td>It will break MCP clients if applied naively.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>If you would rather not fight the ACME challenge, the honest alternative is a Cloudflare <em>Origin Certificate</em>: issue one in the dashboard, mount the certificate and key into Traefik as a static TLS store, and drop the certresolver entirely. It is valid only between Cloudflare and your origin, which is exactly what Full (strict) checks.</p>
+    </section>
+
+    <section id="client-ip">
+      <h2>The client IP problem</h2>
+      <p>This one is worth understanding before you rely on it.</p>
+      <p>Aegis rate-limits failed logins and client registrations <strong>per source IP</strong>, and it reads that IP from the TCP connection rather than from a forwarded header &mdash; deliberately, because a header an attacker controls is not an identity.</p>
+      <p>Behind a proxy, every connection comes from the proxy. So all of your users, and all of an attacker's attempts, land in the same bucket:</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Consequence</th><th>What it means for you</th></tr></thead>
+          <tbody>
+            <tr><td>The limit becomes global</td><td>The default <code>login_rate_limit: 10/m</code> applies to the whole instance, not per person.</td></tr>
+            <tr><td>Lockout is possible</td><td>Someone hammering the login page can exhaust the bucket and stop you signing in, until it refills a few seconds later.</td></tr>
+            <tr><td>The audit log shows the proxy</td><td><code>login_failed</code> lines carry the proxy's address, not the real client's.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>Practical mitigations, in the order I would apply them:</p>
+      <ul>
+        <li><strong>Raise the limit</strong> to something that suits a shared bucket &mdash; <code>login_rate_limit: "60/m"</code> &mdash; and rely on long passwords rather than on throttling.</li>
+        <li><strong>Rate-limit at the proxy instead</strong>, where the real client IP <em>is</em> known. Traefik's <code>RateLimit</code> middleware on the <code>/authorize</code> path, or a Cloudflare WAF rate-limiting rule, does the job properly.</li>
+        <li><strong>Put the login behind Cloudflare Access</strong> and exclude the machine-to-machine paths &mdash; see the next section.</li>
+      </ul>
+
+      <div class="note">
+        <strong>This is a known limitation, not a mystery.</strong> Teaching aegis to trust <code>X-Forwarded-For</code> from a configured list of proxy addresses is on the roadmap; until then, the proxy is the right place to do per-IP limiting.
+      </div>
+    </section>
+
+    <section id="access">
+      <h2>Cloudflare Access, and why it breaks things</h2>
+      <p>Putting Cloudflare Access in front of the whole hostname is tempting and will stop your agent from working. Access expects a browser session; the MCP client is not a browser.</p>
+
+      <p>The flow splits into two kinds of request:</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Path</th><th>Who calls it</th><th>Access?</th></tr></thead>
+          <tbody>
+            <tr><td><code>/authorize</code></td><td>A human in a browser</td><td>Fine to protect</td></tr>
+            <tr><td><code>/.well-known/*</code></td><td>The MCP client, unauthenticated</td><td>Must bypass</td></tr>
+            <tr><td><code>/register</code></td><td>The MCP client</td><td>Must bypass</td></tr>
+            <tr><td><code>/token</code></td><td>The MCP client</td><td>Must bypass</td></tr>
+            <tr><td><code>/mcp</code></td><td>The MCP client, with a bearer token</td><td>Must bypass</td></tr>
+            <tr><td><code>/healthz</code></td><td>Your monitoring</td><td>Must bypass</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>So either protect nothing, or create an Access application scoped to <code>/authorize</code> only and leave the rest open. The machine paths are not unprotected in any meaningful sense: <code>/mcp</code> requires a bearer token, and <code>/token</code> requires a valid authorization code plus the PKCE verifier.</p>
+
+      <p>Adding Access on <code>/authorize</code> is genuinely useful, though &mdash; it puts your identity provider in front of the password form, which is the one endpoint where a human types a secret.</p>
+    </section>
+
+    <section id="timeouts">
+      <h2>Timeouts and the SSE stream</h2>
+      <p>Aegis offers <code>GET /mcp</code> as a Server-Sent Events stream. In v1 it carries nothing but a keep-alive comment every 30 seconds, so a proxy that closes it early is an annoyance rather than a failure &mdash; the client reconnects and everything still works over <code>POST</code>.</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Proxy</th><th>What to know</th></tr></thead>
+          <tbody>
+            <tr><td>Traefik</td><td>Streams responses without buffering by default. Nothing to configure.</td></tr>
+            <tr><td>Cloudflare proxy</td><td>Passes SSE through, but idle connections are dropped after roughly 100 seconds. The 30-second keep-alive is below that, so the stream survives.</td></tr>
+            <tr><td>Cloudflare Tunnel</td><td>Same behaviour; no additional configuration.</td></tr>
+            <tr><td>nginx</td><td>Needs <code>proxy_buffering off;</code> for the SSE location, otherwise the stream is buffered and appears dead.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>The other timeout worth checking is the one on <em>your</em> upstreams. A slow API plus Cloudflare's 100-second edge limit means an <code>http_request</code> that takes longer will be cut off at the edge before aegis's own <code>request_timeout</code> fires. Keeping <code>request_timeout</code> at or below 30 seconds keeps aegis the one deciding.</p>
+    </section>
+
+    <section id="secrets">
+      <h2>Getting secrets into the container</h2>
+      <p>Three ways, worst to best:</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Method</th><th>Config</th><th>Verdict</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Literal in <code>config.yaml</code></td>
+              <td><code>token: "sk-live-..."</code></td>
+              <td>Works, but the file can never be committed and shows up in every backup.</td>
+            </tr>
+            <tr>
+              <td>Environment variable</td>
+              <td><code>token: "env:LEXWARE_TOKEN"</code></td>
+              <td>Fine. Readable via <code>docker inspect</code> and in the process environment.</td>
+            </tr>
+            <tr>
+              <td>Docker secret</td>
+              <td><code>token: "file:/run/secrets/lexware"</code></td>
+              <td>Best. Not in the environment, not in <code>docker inspect</code>, mounted as a tmpfs file.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">docker-compose.yml (secrets)</span></div>
+<pre data-lang="yaml">services:
+  aegis:
+    secrets:
+      - lexware
+    # ...
+
+secrets:
+  lexware:
+    file: ./secrets/lexware_token</pre>
+      </div>
+
+      <p>Then reference it as <code>file:/run/secrets/lexware</code> in <code>config.yaml</code>. Note that <code>read_only: true</code> does not interfere: Docker mounts secrets on their own tmpfs.</p>
+
+      <p>Validate before you start, so a typo does not become a restart loop:</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">shell</span></div>
+<pre data-lang="shell">docker compose run --rm aegis validate /etc/aegis/config.yaml</pre>
+      </div>
+    </section>
+
+    <section id="updates">
+      <h2>Updates and reloads</h2>
+      <p>Two different operations, and only one of them costs you your sessions.</p>
+
+      <h3>Changing the config</h3>
+      <p>Edit <code>config.yaml</code> and aegis picks it up within two seconds; <code>SIGHUP</code> forces it immediately. A file that does not parse is rejected and the previous configuration keeps running. <strong>Sessions survive.</strong></p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">shell</span></div>
+<pre data-lang="shell">docker compose kill -s HUP aegis
+docker compose logs --tail 5 aegis</pre>
+      </div>
+
+      <h3>Changing the image</h3>
+      <p>A restart wipes all in-memory state: every client re-registers and every user signs in again. That is by design, but it means you want to pin a version rather than have <code>:latest</code> move under you at an inconvenient moment.</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">shell</span></div>
+<pre data-lang="shell"># Pin to a digest and know exactly what is running
+docker compose pull
+docker compose up -d
+docker compose exec aegis /aegis version</pre>
+      </div>
+    </section>
+
+    <section id="troubleshooting">
+      <h2>Troubleshooting</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Client says the server is not an OAuth server</td>
+              <td>The proxy is not routing <code>/.well-known/*</code>, or Access is intercepting it. Check with <code>curl https://host/.well-known/oauth-authorization-server</code>.</td>
+            </tr>
+            <tr>
+              <td>Login page loads, then the client fails</td>
+              <td><code>public_url</code> does not match the hostname the client used. Every redirect is built from it.</td>
+            </tr>
+            <tr>
+              <td>Redirect goes to <code>http://</code></td>
+              <td><code>AEGIS_PUBLIC_URL</code> is missing the <code>https://</code> scheme.</td>
+            </tr>
+            <tr>
+              <td>404 from the proxy</td>
+              <td>Traefik label <code>loadbalancer.server.port</code> is not <code>2019</code>, or the container is not on the same network as Traefik.</td>
+            </tr>
+            <tr>
+              <td>502 from the proxy</td>
+              <td>aegis exited. <code>docker compose logs aegis</code> &mdash; a <code>config_error</code> line at startup is the usual reason.</td>
+            </tr>
+            <tr>
+              <td><code>403 origin not allowed</code></td>
+              <td>A browser sent an <code>Origin</code> that is not <code>public_url</code>. Normal for a cross-origin experiment, never for a real client.</td>
+            </tr>
+            <tr>
+              <td>Everyone gets rate-limited at once</td>
+              <td><a href="#client-ip">The client IP problem</a>.</td>
+            </tr>
+            <tr>
+              <td><code>short_secret</code> warning at startup</td>
+              <td>A secret under 8 characters cannot be redacted from responses. Replace it with a longer credential.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>When something is unclear, the audit log is the fastest way in &mdash; one JSON line per request, with the target, the status and the names of the secrets that were attached:</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">shell</span></div>
+<pre data-lang="shell">docker compose logs -f aegis | grep '"event":"request"'</pre>
+      </div>
+    </section>
+
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div>&copy; <span data-year>2026</span> <a href="https://github.com/andreaskasper">Andreas Kasper</a> &middot; MIT licensed</div>
+    <nav class="foot-links">
+      <a href="index.html">Overview</a>
+      <a href="docs.html">Docs</a>
+      <a href="security.html">Security</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="https://github.com/andreaskasper/aegis">GitHub</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>
