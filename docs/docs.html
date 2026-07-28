@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Documentation &mdash; aegis</title>
+<meta name="description" content="Configuration reference, OAuth endpoints, MCP tools, the request pipeline, error codes and the CLI for aegis.">
+<link rel="icon" href="logo.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="index.html"><img src="logo.png" alt=""> aegis</a>
+    <div class="header-actions">
+      <button class="icon-btn nav-toggle" type="button" aria-expanded="false" aria-label="Menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+      <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme">
+        <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+    </div>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <a href="docs.html" aria-current="page">Docs</a>
+      <a href="security.html">Security</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="https://github.com/andreaskasper/aegis">GitHub&nbsp;&rarr;</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap doc-layout">
+
+  <aside class="toc">
+    <strong>On this page</strong>
+    <a href="#quick-start">Quick start</a>
+    <a href="#configuration">Configuration</a>
+    <a href="#values">Value prefixes</a>
+    <a href="#targets">Targets</a>
+    <a href="#reload">Reloading</a>
+    <a href="#auth">Authentication</a>
+    <a href="#tools">Tools</a>
+    <a href="#pipeline">Request pipeline</a>
+    <a href="#errors">Errors</a>
+    <a href="#audit">Audit log</a>
+    <a href="#cli">CLI</a>
+    <a href="#env">Environment</a>
+  </aside>
+
+  <div class="doc-body">
+
+    <section id="quick-start">
+      <h1 style="font-size:clamp(1.9rem,4vw,2.6rem)">Documentation</h1>
+      <p class="lede">Everything needed to run aegis. The full specification lives in <a href="https://github.com/andreaskasper/aegis/blob/main/spezifikation.md">spezifikation.md</a>; where the two disagree, the spec wins.</p>
+
+      <h2>Quick start</h2>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">docker</span></div>
+<pre data-lang="shell">docker run -d --name aegis -p 2019:2019 \
+  -v "$PWD/config.yaml:/etc/aegis/config.yaml:ro" \
+  -e AEGIS_PUBLIC_URL=https://aegis.example.com \
+  --read-only --cap-drop ALL \
+  ghcr.io/andreaskasper/aegis:latest</pre>
+      </div>
+
+      <p>Or with Compose:</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">docker-compose.yml</span></div>
+<pre data-lang="yaml">services:
+  aegis:
+    image: ghcr.io/andreaskasper/aegis:latest
+    ports: ["2019:2019"]
+    volumes:
+      - ./config.yaml:/etc/aegis/config.yaml:ro
+    environment:
+      AEGIS_PUBLIC_URL: https://aegis.example.com
+    read_only: true
+    cap_drop: [ALL]
+    restart: unless-stopped</pre>
+      </div>
+
+      <p>Then point an MCP client at <code>https://aegis.example.com/mcp</code>. The client discovers the OAuth endpoints, registers itself, and opens the login page in a browser.</p>
+
+      <div class="note warn">
+        <strong>Aegis does not terminate TLS.</strong> Put it behind a reverse proxy in production. The OAuth flow sends credentials through the browser; plain HTTP is only reasonable on localhost.
+      </div>
+
+      <p>Building from source instead:</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">shell</span></div>
+<pre data-lang="shell">git clone https://github.com/andreaskasper/aegis
+cd aegis/src
+go build -o aegis .
+AEGIS_CONFIG=../config.yaml AEGIS_PUBLIC_URL=http://localhost:2019 ./aegis</pre>
+      </div>
+    </section>
+
+    <section id="configuration">
+      <h2>Configuration</h2>
+      <p>One YAML file holds everything. Users are the top-level unit: each user brings its own secrets and its own targets, so what a user can do is answerable by reading one contiguous block.</p>
+
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">config.yaml</span></div>
+<pre data-lang="yaml">server:
+  listen: ":2019"
+  public_url: "https://aegis.example.com"   # required
+  max_response_bytes: 1048576               # 1 MiB
+  request_timeout: "30s"
+  token_ttl: "12h"
+  code_ttl: "60s"
+  login_rate_limit: "10/m"                  # per source IP
+
+users:
+  - name: andreas
+    password: "bcrypt:$2a$12$..."
+    allow_any: false
+
+    secrets:
+      lexware_token: "env:LEXWARE_TOKEN"
+      github_pat: "file:/run/secrets/github_pat"
+
+    targets:
+      - id: lexware
+        description: "Lexware Office accounting API"
+        base_url: "https://api.lexware.io"
+        methods: [GET, POST]
+        paths: ["/v1/**"]
+        rate_limit: "60/m"
+        inject:
+          headers:
+            Authorization: "Bearer ${lexware_token}"</pre>
+      </div>
+
+      <h3>Server</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>listen</code></td><td><code>:2019</code></td><td>Listen address.</td></tr>
+            <tr><td><code>public_url</code></td><td>&mdash;</td><td><strong>Required.</strong> The URL clients reach aegis on; OAuth redirect URIs are derived from it. May be set with <code>AEGIS_PUBLIC_URL</code> instead.</td></tr>
+            <tr><td><code>max_response_bytes</code></td><td><code>1048576</code></td><td>Responses beyond this are truncated before reaching the model.</td></tr>
+            <tr><td><code>request_timeout</code></td><td><code>30s</code></td><td>Timeout for outbound requests.</td></tr>
+            <tr><td><code>token_ttl</code></td><td><code>12h</code></td><td>Access token lifetime.</td></tr>
+            <tr><td><code>code_ttl</code></td><td><code>60s</code></td><td>Authorization code lifetime.</td></tr>
+            <tr><td><code>login_rate_limit</code></td><td><code>10/m</code></td><td>Failed logins allowed per source IP.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Users</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>name</code></td><td>Login name. <code>[a-zA-Z0-9._-]{1,64}</code>, unique.</td></tr>
+            <tr><td><code>password</code></td><td>A literal password or a <code>bcrypt:</code> hash. See <a href="#values">value prefixes</a>.</td></tr>
+            <tr><td><code>allow_any</code></td><td>If true, this user may also request arbitrary public URLs. No credentials are attached outside a configured target, and the network guard still applies. Default <code>false</code>.</td></tr>
+            <tr><td><code>secrets</code></td><td>Map of name to value. Names are <code>[a-zA-Z0-9_]{1,64}</code>.</td></tr>
+            <tr><td><code>targets</code></td><td>List of permitted destinations, see <a href="#targets">targets</a>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="values">
+      <h2>Value prefixes</h2>
+      <p>Every secret value, and every password, may be literal or a reference. Resolution happens once at load time &mdash; an unresolvable reference is a configuration error, not a runtime surprise.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Form</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>hunter2</code></td><td>Literal value.</td></tr>
+            <tr><td><code>env:NAME</code></td><td>Read from the environment. Unset or empty fails the load.</td></tr>
+            <tr><td><code>file:/path</code></td><td>Read from a file, trailing newline trimmed &mdash; for Docker and Podman secrets.</td></tr>
+            <tr><td><code>bcrypt:$2a$...</code></td><td>Passwords only: a bcrypt hash. Generate with <code>aegis hashpw</code>.</td></tr>
+            <tr><td><code>literal:env:x</code></td><td>Escape hatch for a literal value that starts with a prefix keyword.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note">
+        <strong>Secrets shorter than 8 characters are not redacted from responses.</strong> Below that length the false-positive rate would corrupt legitimate content. Aegis logs a warning at startup naming each such secret &mdash; it is not a silent compromise, but it is a real gap. Use long credentials.
+      </div>
+    </section>
+
+    <section id="targets">
+      <h2>Targets</h2>
+      <p>A target is a permitted destination. The first target whose scheme, host, port and path pattern accept a URL wins; the method is checked afterwards, so the audit log can name the target that was attempted.</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>id</code></td><td>&mdash;</td><td>Required, unique within the user.</td></tr>
+            <tr><td><code>description</code></td><td>&mdash;</td><td>Required. Shown to the model in <code>list_targets</code>, so write it for the model.</td></tr>
+            <tr><td><code>base_url</code></td><td>&mdash;</td><td>Required. Absolute <code>http</code> or <code>https</code>, no query or fragment. A base URL in a private range is rejected at load time.</td></tr>
+            <tr><td><code>methods</code></td><td><code>[GET]</code></td><td>Allowed HTTP methods.</td></tr>
+            <tr><td><code>paths</code></td><td><code>["/**"]</code></td><td>Allowed path patterns.</td></tr>
+            <tr><td><code>rate_limit</code></td><td>unlimited</td><td><code>&lt;count&gt;/&lt;s|m|h&gt;</code>, e.g. <code>60/m</code>. The guard against a model in a loop.</td></tr>
+            <tr><td><code>timeout</code></td><td>server default</td><td>Per-target request timeout.</td></tr>
+            <tr><td><code>max_response_bytes</code></td><td>server default</td><td>Per-target response cap.</td></tr>
+            <tr><td><code>follow_redirects</code></td><td><code>false</code></td><td>If true, up to 5 hops are followed and every hop is re-checked against the target and the network guard.</td></tr>
+            <tr><td><code>inject</code></td><td>&mdash;</td><td>What aegis attaches on the way out.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Path patterns</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Token</th><th>Matches</th></tr></thead>
+          <tbody>
+            <tr><td><code>*</code></td><td>Any characters within one segment.</td></tr>
+            <tr><td><code>**</code></td><td>Zero or more whole segments. Only valid as a complete segment.</td></tr>
+            <tr><td><code>?</code></td><td>A single character within one segment.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Matching is case-sensitive and runs on the decoded, cleaned path. A request path containing <code>..</code> is rejected before matching, so traversal cannot launder a URL into a narrower pattern.</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Pattern</th><th><code>/v1/contacts</code></th><th><code>/v1/contacts/42</code></th><th><code>/v2/x</code></th></tr></thead>
+          <tbody>
+            <tr><td><code>/v1/**</code></td><td>yes</td><td>yes</td><td>no</td></tr>
+            <tr><td><code>/v1/*</code></td><td>yes</td><td>no</td><td>no</td></tr>
+            <tr><td><code>/**</code></td><td>yes</td><td>yes</td><td>yes</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Injection</h3>
+      <p>Injection rules are attached to the target, never chosen by the model. Values may contain <code>${secret_name}</code>; <code>$${</code> is a literal <code>${</code>.</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">inject</span></div>
+<pre data-lang="yaml">inject:
+  headers:
+    Authorization: "Bearer ${token}"      # set, overwriting the model
+  query:
+    appid: "${api_key}"                   # set on the final URL
+  body:
+    "$.auth.token": "${token}"            # JSON bodies only</pre>
+      </div>
+      <p>Body injection applies only when the request body parses as JSON and the content type is JSON; otherwise the request is refused with <code>body_injection_failed</code>. Intermediate objects on the path are created as needed.</p>
+    </section>
+
+    <section id="reload">
+      <h2>Reloading</h2>
+      <p>Aegis watches the config file and reloads on change; <code>SIGHUP</code> forces it. If the new file does not parse or does not validate, <strong>the previous configuration stays active</strong> and one error line is logged. Existing sessions survive a reload &mdash; which matters, because a restart logs everyone out.</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">shell</span></div>
+<pre data-lang="shell">docker kill -s HUP aegis</pre>
+      </div>
+      <p>A removed user invalidates its tokens on their next use. Target changes take effect on the next request.</p>
+    </section>
+
+    <section id="auth">
+      <h2>Authentication</h2>
+      <p>Aegis is its own OAuth 2.1 authorization server, so a compliant MCP client needs nothing but the URL.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Endpoint</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>/.well-known/oauth-protected-resource</code></td><td>Points at the authorization server.</td></tr>
+            <tr><td><code>/.well-known/oauth-authorization-server</code></td><td>Endpoint and capability metadata.</td></tr>
+            <tr><td><code>POST /register</code></td><td>Dynamic client registration (RFC 7591). Public clients only, so PKCE is mandatory.</td></tr>
+            <tr><td><code>GET /authorize</code></td><td>The login form.</td></tr>
+            <tr><td><code>POST /authorize</code></td><td>Credential check, then an authorization code.</td></tr>
+            <tr><td><code>POST /token</code></td><td>Code plus PKCE verifier, or a refresh token, in exchange for an access token.</td></tr>
+            <tr><td><code>GET /healthz</code></td><td>Unauthenticated health check.</td></tr>
+            <tr><td><code>/mcp</code></td><td>The MCP endpoint. <code>POST</code> for JSON-RPC, <code>GET</code> for the SSE stream, <code>DELETE</code> to end the session.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>There is no consent screen: a successful login issues a token scoped to that user's targets. The token <em>is</em> the identity &mdash; it decides what is reachable and which secrets are attached.</p>
+      <div class="note">
+        <strong>Everything is in memory.</strong> Registered clients, authorization codes and tokens do not survive a restart. After <code>docker restart aegis</code>, clients re-register and users sign in again. That is deliberate: a container holding credentials should leave nothing on disk. Hot-reloading the config is what keeps restarts rare.
+      </div>
+    </section>
+
+    <section id="tools">
+      <h2>Tools</h2>
+
+      <h3><code>list_targets</code></h3>
+      <p>No arguments. Returns the targets the calling user may reach. Injection rules, secret names and secret values are <strong>not</strong> part of the response.</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">result</span></div>
+<pre data-lang="json">{
+  "targets": [
+    {
+      "id": "github",
+      "description": "GitHub REST API, read-only",
+      "base_url": "https://api.github.com",
+      "methods": ["GET"],
+      "paths": ["/repos/andreaskasper/**", "/user"],
+      "rate_limit": "120/m"
+    }
+  ],
+  "allow_any": false
+}</pre>
+      </div>
+
+      <h3><code>http_request</code></h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Argument</th><th>Type</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td><code>url</code></td><td>string</td><td><strong>Required.</strong> Absolute, including scheme and host.</td></tr>
+            <tr><td><code>method</code></td><td>string</td><td>Default <code>GET</code>.</td></tr>
+            <tr><td><code>headers</code></td><td>object</td><td>Reserved and target-injected headers are rejected.</td></tr>
+            <tr><td><code>query</code></td><td>object</td><td>Merged into the URL. Injected parameters win.</td></tr>
+            <tr><td><code>body</code></td><td>string</td><td>Raw request body, up to 1 MiB.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>An upstream 4xx or 5xx is a <em>successful</em> tool call &mdash; the status is reported rather than raised. Only aegis-side refusals are errors.</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">result</span></div>
+<pre data-lang="json">{
+  "status": 200,
+  "headers": {"content-type": "application/json"},
+  "body": "...",
+  "truncated": false,
+  "target": "github",
+  "duration_ms": 143
+}</pre>
+      </div>
+
+      <h3>Headers the model may not set</h3>
+      <p><code>Authorization</code>, <code>Proxy-Authorization</code>, <code>Cookie</code>, <code>Host</code>, <code>Content-Length</code>, <code>Connection</code>, <code>Transfer-Encoding</code>, <code>Upgrade</code>, <code>X-Forwarded-*</code>, <code>X-Real-IP</code> &mdash; plus any header the matched target injects. A header value containing a line break is refused too.</p>
+    </section>
+
+    <section id="pipeline">
+      <h2>Request pipeline</h2>
+      <p>Ordered. Any step may end the request.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>Step</th><th>On failure</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>Authenticate the bearer token to exactly one user</td><td>401</td></tr>
+            <tr><td>2</td><td>Parse and normalise the URL, reject traversal and embedded credentials</td><td>400</td></tr>
+            <tr><td>3</td><td>Match a target of that user</td><td>403</td></tr>
+            <tr><td>4</td><td>Network guard: resolve and check the destination</td><td>403</td></tr>
+            <tr><td>5</td><td>Rate limit for this user and target</td><td>429</td></tr>
+            <tr><td>6</td><td>Method allowed by the target</td><td>403</td></tr>
+            <tr><td>7</td><td>Header check</td><td>400</td></tr>
+            <tr><td>8</td><td>Request body size</td><td>413</td></tr>
+            <tr><td>9</td><td>Inject headers, query parameters and body fields</td><td>400</td></tr>
+            <tr><td>10</td><td>Send</td><td>502 / 504</td></tr>
+            <tr><td>11</td><td>Redact every secret value from body and headers</td><td>&mdash;</td></tr>
+            <tr><td>12</td><td>Truncate to the response cap</td><td>&mdash;</td></tr>
+            <tr><td>13</td><td>Write one audit line</td><td>&mdash;</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Redaction runs before truncation, so a secret cannot survive by straddling the cut. <code>Set-Cookie</code> is dropped entirely and never reaches the model.</p>
+    </section>
+
+    <section id="errors">
+      <h2>Errors</h2>
+      <p>Aegis-side refusals come back as a tool error with a stable code:</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">tool error</span></div>
+<pre data-lang="json">{
+  "error": "no_target",
+  "message": "No permitted target matches this URL. Call list_targets to see what is available.",
+  "status": 403
+}</pre>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Code</th><th>Status</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>invalid_url</code></td><td>400</td><td>Not absolute, bad scheme, credentials in the URL, or <code>..</code> in the path.</td></tr>
+            <tr><td><code>reserved_header</code></td><td>400</td><td>The model tried to set a reserved or injected header.</td></tr>
+            <tr><td><code>body_injection_failed</code></td><td>400</td><td>Body injection is configured but the body is not JSON.</td></tr>
+            <tr><td><code>no_target</code></td><td>403</td><td>No target matched the URL.</td></tr>
+            <tr><td><code>method_not_allowed</code></td><td>403</td><td>Target matched, method not permitted.</td></tr>
+            <tr><td><code>blocked_network</code></td><td>403</td><td>The destination resolves into a blocked range.</td></tr>
+            <tr><td><code>redirect_out_of_scope</code></td><td>403</td><td>A redirect left the target.</td></tr>
+            <tr><td><code>request_too_large</code></td><td>413</td><td>Request body over 1 MiB.</td></tr>
+            <tr><td><code>rate_limited</code></td><td>429</td><td>Bucket empty. Carries <code>retry_after_ms</code>.</td></tr>
+            <tr><td><code>upstream_timeout</code></td><td>504</td><td>The upstream did not respond in time.</td></tr>
+            <tr><td><code>upstream_error</code></td><td>502</td><td>Connection or TLS failure.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="audit">
+      <h2>Audit log</h2>
+      <p>One JSON object per line on stdout, for every request &mdash; allowed or refused.</p>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">stdout</span></div>
+<pre data-lang="json">{"ts":"2026-07-28T21:14:02.183Z","level":"info","event":"request",
+ "user":"andreas","client_id":"aBc123","target":"github",
+ "method":"GET","url":"https://api.github.com/user","status":200,
+ "duration_ms":143,"bytes":312,"truncated":false,
+ "injected":["github_pat"],"redacted":0}</pre>
+      </div>
+      <p><code>injected</code> lists secret <em>names</em> only. Any query parameter the target injects is written as <code>[REDACTED]</code> in the logged URL. Request and response bodies are never logged, at any level.</p>
+      <p>A non-zero <code>redacted</code> count is worth attention: it means the upstream reflected one of your credentials back, and redaction caught it.</p>
+      <p>Other events: <code>startup</code>, <code>shutdown</code>, <code>config_reloaded</code>, <code>config_error</code>, <code>short_secret</code>, <code>login_success</code>, <code>login_failed</code>, <code>client_registered</code>, <code>token_issued</code>, <code>token_reuse_detected</code>.</p>
+    </section>
+
+    <section id="cli">
+      <h2>CLI</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Command</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>aegis</code></td><td>Run the server.</td></tr>
+            <tr><td><code>aegis validate [path]</code></td><td>Parse, resolve and validate a config. Prints every problem at once and exits non-zero on error. Never prints a secret value.</td></tr>
+            <tr><td><code>aegis hashpw</code></td><td>Read a password from a TTY or stdin and print a bcrypt hash.</td></tr>
+            <tr><td><code>aegis version</code></td><td>Version, commit and build date.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="code">
+        <div class="code-head"><span class="dots"><i></i><i></i><i></i></span><span class="name">aegis validate</span></div>
+<pre data-lang="shell">$ aegis validate config.yaml
+config.yaml: OK
+  public_url: https://aegis.example.com
+  listen:     :2019
+
+  user andreas (allow_any=false)
+    secrets: github_pat, lexware_token
+    target lexware   GET,POST https://api.lexware.io  paths=/v1/**
+    target github    GET https://api.github.com  paths=/repos/andreaskasper/**,/user</pre>
+      </div>
+    </section>
+
+    <section id="env">
+      <h2>Environment</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>AEGIS_CONFIG</code></td><td><code>/etc/aegis/config.yaml</code></td><td>Config path.</td></tr>
+            <tr><td><code>AEGIS_LISTEN</code></td><td><code>:2019</code></td><td>Listen address. Overrides the config.</td></tr>
+            <tr><td><code>AEGIS_PUBLIC_URL</code></td><td>&mdash;</td><td>External base URL. Overrides the config.</td></tr>
+            <tr><td><code>AEGIS_LOG_LEVEL</code></td><td><code>info</code></td><td><code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Any variable referenced by an <code>env:</code> value in the config must be present in the container's environment as well.</p>
+    </section>
+
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div>&copy; <span data-year>2026</span> <a href="https://github.com/andreaskasper">Andreas Kasper</a> &middot; MIT licensed</div>
+    <nav class="foot-links">
+      <a href="index.html">Overview</a>
+      <a href="security.html">Security</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="https://github.com/andreaskasper/aegis">GitHub</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>
