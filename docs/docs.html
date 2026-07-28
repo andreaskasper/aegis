@@ -25,6 +25,7 @@
     <nav class="nav">
       <a href="index.html">Overview</a>
       <a href="docs.html" aria-current="page">Docs</a>
+      <a href="deploy.html">Deployment</a>
       <a href="security.html">Security</a>
       <a href="roadmap.html">Roadmap</a>
       <a href="https://github.com/andreaskasper/aegis">GitHub&nbsp;&rarr;</a>
@@ -54,7 +55,7 @@
 
     <section id="quick-start">
       <h1 style="font-size:clamp(1.9rem,4vw,2.6rem)">Documentation</h1>
-      <p class="lede">Everything needed to run aegis. The full specification lives in <a href="https://github.com/andreaskasper/aegis/blob/main/spezifikation.md">spezifikation.md</a>; where the two disagree, the spec wins.</p>
+      <p class="lede">Everything needed to run aegis. For putting it behind a reverse proxy, see the <a href="deploy.html">deployment guide</a>. The full specification lives in <a href="https://github.com/andreaskasper/aegis/blob/main/spezifikation.md">spezifikation.md</a>; where the two disagree, the spec wins.</p>
 
       <h2>Quick start</h2>
       <div class="code">
@@ -85,7 +86,7 @@
       <p>Then point an MCP client at <code>https://aegis.example.com/mcp</code>. The client discovers the OAuth endpoints, registers itself, and opens the login page in a browser.</p>
 
       <div class="note warn">
-        <strong>Aegis does not terminate TLS.</strong> Put it behind a reverse proxy in production. The OAuth flow sends credentials through the browser; plain HTTP is only reasonable on localhost.
+        <strong>Aegis does not terminate TLS.</strong> Put it behind a reverse proxy in production, and do not publish port 2019 when you do. The <a href="deploy.html">deployment guide</a> has ready-to-run Compose setups for Traefik with Let's Encrypt, for a Cloudflare Tunnel, and for Cloudflare's proxy in front of Traefik &mdash; along with the pitfalls: <a href="deploy.html#client-ip">the client IP behind a proxy</a>, Cloudflare Access breaking MCP clients, and SSE timeouts.
       </div>
 
       <p>Building from source instead:</p>
@@ -145,7 +146,7 @@ users:
             <tr><td><code>request_timeout</code></td><td><code>30s</code></td><td>Timeout for outbound requests.</td></tr>
             <tr><td><code>token_ttl</code></td><td><code>12h</code></td><td>Access token lifetime.</td></tr>
             <tr><td><code>code_ttl</code></td><td><code>60s</code></td><td>Authorization code lifetime.</td></tr>
-            <tr><td><code>login_rate_limit</code></td><td><code>10/m</code></td><td>Failed logins allowed per source IP.</td></tr>
+            <tr><td><code>login_rate_limit</code></td><td><code>10/m</code></td><td>Failed logins allowed per source IP. Behind a proxy this becomes a single shared bucket &mdash; see <a href="deploy.html#client-ip">the client IP problem</a>.</td></tr>
           </tbody>
         </table>
       </div>
@@ -456,6 +457,7 @@ config.yaml: OK
     <div>&copy; <span data-year>2026</span> <a href="https://github.com/andreaskasper">Andreas Kasper</a> &middot; MIT licensed</div>
     <nav class="foot-links">
       <a href="index.html">Overview</a>
+      <a href="deploy.html">Deployment</a>
       <a href="security.html">Security</a>
       <a href="roadmap.html">Roadmap</a>
       <a href="https://github.com/andreaskasper/aegis">GitHub</a>
