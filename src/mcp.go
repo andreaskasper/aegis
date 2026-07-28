@@ -116,9 +116,8 @@ func (m *mcpSessions) sweep() {
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Config()
 
-	// DNS-rebinding protection: a browser-originated request must come from
-	// our own origin.
 	if origin := r.Header.Get("Origin"); origin != "" && !s.originAllowed(cfg, origin) {
+		logWarn("origin_refused", map[string]any{"origin": origin, "ip": clientIP(r)})
 		writeHTTPError(w, http.StatusForbidden, "origin not allowed")
 		return
 	}
@@ -196,12 +195,30 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	writeRPC(w, sessionID, resp)
 }
 
+// originAllowed implements the DNS-rebinding guard.
+//
+// That guard exists for servers bound to loopback, where a malicious page in
+// the user's browser could otherwise reach an unauthenticated local service.
+// /mcp is bearer-protected on a public host, so refusing every foreign Origin
+// buys almost nothing and breaks legitimate clients: a hosted MCP client
+// sends its own Origin, and gets a 403 for its trouble.
+//
+// So the check is opt-in. Without server.allowed_origins nothing is refused
+// and the bearer token remains the control. With it configured, the list is
+// enforced strictly.
 func (s *Server) originAllowed(cfg *Config, origin string) bool {
+	if len(cfg.AllowedOrigins) == 0 {
+		return true
+	}
 	if strings.EqualFold(origin, cfg.Issuer()) {
 		return true
 	}
-	lo := strings.ToLower(origin)
-	return strings.HasPrefix(lo, "http://localhost") || strings.HasPrefix(lo, "http://127.0.0.1")
+	for _, allowed := range cfg.AllowedOrigins {
+		if allowed == "*" || strings.EqualFold(allowed, origin) {
+			return true
+		}
+	}
+	return false
 }
 
 // authenticate resolves the bearer token to a user.
