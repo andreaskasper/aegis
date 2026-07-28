@@ -1,0 +1,73 @@
+# aegis behind a Cloudflare Tunnel
+#
+#   cp .env.example .env      and put your tunnel token in it
+#   cp ../../config.example.yaml config.yaml   and edit it
+#   docker compose up -d
+#
+# Nothing listens on the host. cloudflared opens an outbound connection to
+# Cloudflare and receives requests through it, so the server needs no open
+# port, no firewall exception and no certificate. For a process that holds
+# credentials, that is the smallest attack surface of the three setups.
+#
+# In the Cloudflare Zero Trust dashboard, configure the tunnel's public
+# hostname to point at:
+#
+#     Service: HTTP    URL: aegis:2019
+#
+# "aegis" is the service name below - cloudflared resolves it over the
+# internal Docker network. HTTP is correct here: the hop is inside Docker,
+# and TLS is terminated by Cloudflare.
+
+name: aegis
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    networks:
+      - internal
+    depends_on:
+      - aegis
+    # cloudflared only needs outbound access.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+  aegis:
+    image: ghcr.io/andreaskasper/aegis:latest
+    restart: unless-stopped
+
+    # No "ports:" and no host networking. The only way in is the tunnel.
+
+    environment:
+      # The hostname you configured on the tunnel, not the container name.
+      AEGIS_PUBLIC_URL: https://${AEGIS_HOST}
+      AEGIS_LOG_LEVEL: ${AEGIS_LOG_LEVEL:-info}
+      LEXWARE_TOKEN: ${LEXWARE_TOKEN:-}
+      GITHUB_PAT: ${GITHUB_PAT:-}
+
+    volumes:
+      - ./config.yaml:/etc/aegis/config.yaml:ro
+
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+    networks:
+      - internal
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  # internal: true would also cut off aegis's own outbound requests to your
+  # APIs, so this is a normal bridge network.
+  internal:
