@@ -86,14 +86,22 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	redirectURI := r.PostForm.Get("redirect_uri")
 	csrf := r.PostForm.Get("csrf")
 
-	entry, ok := s.sessions.ConsumeCSRF(csrf, clientID, redirectURI)
-	if !ok {
-		renderError(w, http.StatusBadRequest, "This login form has expired. Start the authorization again.")
-		return
-	}
 	c := s.sessions.Client(clientID)
 	if c == nil || !c.AllowsRedirect(redirectURI) {
 		renderError(w, http.StatusBadRequest, "Unknown client or redirect URI.")
+		return
+	}
+
+	entry, ok := s.sessions.ConsumeCSRF(csrf, clientID, redirectURI)
+	if !ok {
+		// A stale token means the form was submitted twice, or the client
+		// restarted the flow behind the user's back. The PKCE challenge is
+		// not ours to invent, so we cannot simply re-issue a usable form:
+		// say plainly what happened and where to restart.
+		logWarn("login_stale_form", map[string]any{"client_id": clientID, "ip": clientIP(r)})
+		renderError(w, http.StatusBadRequest,
+			"This login form is no longer valid - it was already used, or the client started a new "+
+				"attempt. Close this window and trigger the connection from your client again.")
 		return
 	}
 
@@ -180,7 +188,10 @@ func securityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+	// img-src 'self' is needed for the embedded mark; everything else stays
+	// shut, and there is no script on this page at all.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 }
 
 func renderLogin(w http.ResponseWriter, status int, v loginView) {
@@ -203,8 +214,9 @@ body { margin:0; min-height:100vh; display:flex; align-items:center; justify-con
   background:#f5f6f8; color:#16181d; padding:24px; }
 .card { width:100%; max-width:380px; background:#fff; border:1px solid #e3e5e9;
   border-radius:12px; padding:32px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
-h1 { margin:0 0 4px; font-size:20px; letter-spacing:-.01em; }
-.sub { margin:0 0 24px; color:#6b7280; font-size:13px; }
+.mark { display:block; width:56px; height:56px; margin:0 auto 14px; border-radius:14px; }
+h1 { margin:0 0 4px; font-size:20px; letter-spacing:-.01em; text-align:center; }
+.sub { margin:0 0 24px; color:#6b7280; font-size:13px; text-align:center; }
 label { display:block; font-size:13px; font-weight:500; margin:0 0 6px; }
 input { width:100%; padding:10px 12px; margin:0 0 16px; border:1px solid #d4d7dd;
   border-radius:8px; font-size:15px; background:#fff; color:inherit; }
@@ -213,7 +225,7 @@ button { width:100%; padding:11px; border:0; border-radius:8px; background:#1618
   color:#fff; font-size:15px; font-weight:500; cursor:pointer; }
 button:hover { background:#2d3139; }
 .err { background:#fef2f2; border:1px solid #fecaca; color:#991b1b;
-  padding:10px 12px; border-radius:8px; margin:0 0 20px; font-size:13px; }
+  padding:10px 12px; border-radius:8px; margin:0 0 20px; font-size:13px; text-align:center; }
 .foot { margin:24px 0 0; padding-top:16px; border-top:1px solid #eceef1;
   color:#9aa0aa; font-size:12px; text-align:center; }
 @media (prefers-color-scheme: dark) {
@@ -230,19 +242,24 @@ button:hover { background:#2d3139; }
 var loginTemplate = template.Must(template.New("login").Parse(`<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in - aegis</title><style>` + pageCSS + `</style></head>
+<title>Sign in - aegis</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<style>` + pageCSS + `</style></head>
 <body><main class="card">
-<h1>&#128737; aegis</h1>
+<img class="mark" src="/favicon.png" alt="" width="56" height="56">
+<h1>aegis</h1>
 <p class="sub">{{if .ClientName}}<strong>{{.ClientName}}</strong> is requesting access on your behalf.{{else}}Sign in to continue.{{end}}</p>
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
-<form method="post" action="/authorize" autocomplete="off">
+<form method="post" action="/authorize">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <input type="hidden" name="client_id" value="{{.ClientID}}">
   <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
   <label for="u">Username</label>
-  <input id="u" name="username" autocapitalize="off" autocorrect="off" spellcheck="false" autofocus required>
+  <input id="u" name="username" autocomplete="username" autocapitalize="off"
+         autocorrect="off" spellcheck="false" autofocus required>
   <label for="p">Password</label>
-  <input id="p" name="password" type="password" required>
+  <input id="p" name="password" type="password" autocomplete="current-password"
+         enterkeyhint="go" required>
   <button type="submit">Sign in</button>
 </form>
 <p class="foot">Your credentials are never shared with the client.</p>
@@ -251,9 +268,12 @@ var loginTemplate = template.Must(template.New("login").Parse(`<!DOCTYPE html>
 var errorTemplate = template.Must(template.New("error").Parse(`<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Error - aegis</title><style>` + pageCSS + `</style></head>
+<title>Error - aegis</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<style>` + pageCSS + `</style></head>
 <body><main class="card">
-<h1>&#128737; aegis</h1>
+<img class="mark" src="/favicon.png" alt="" width="56" height="56">
+<h1>aegis</h1>
 <p class="sub">Authorization could not continue.</p>
 <div class="err">{{.}}</div>
 </main></body></html>`))
