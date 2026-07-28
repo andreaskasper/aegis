@@ -77,6 +77,25 @@ func TestDiscoveryDocuments(t *testing.T) {
 	}
 }
 
+func TestFaviconIsServed(t *testing.T) {
+	_, h := newOAuthServer(t)
+	for _, path := range []string{"/favicon.ico", "/favicon.png", "/logo.png"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 200 {
+			t.Errorf("%s: status %d", path, rec.Code)
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+			t.Errorf("%s: content type %q", path, ct)
+		}
+		b := rec.Body.Bytes()
+		if len(b) < 1000 || string(b[1:4]) != "PNG" {
+			t.Errorf("%s: does not look like a PNG (%d bytes)", path, len(b))
+		}
+	}
+}
+
 func TestDynamicClientRegistration(t *testing.T) {
 	_, h := newOAuthServer(t)
 
@@ -190,6 +209,16 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 	if rec.Code != 400 {
 		t.Error("a consumed code must not be reusable")
 	}
+
+	// 6. A stale form is refused rather than silently accepted
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, postForm("/authorize", url.Values{
+		"csrf": {csrf}, "client_id": {c.ID}, "redirect_uri": {redirect},
+		"username": {"andreas"}, "password": {"hunter2hunter2"},
+	}))
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "no longer valid") {
+		t.Errorf("a reused CSRF token must be refused clearly, got %d: %s", rec.Code, rec.Body)
+	}
 }
 
 func TestTokenExchangeAndRefreshRotation(t *testing.T) {
@@ -239,6 +268,62 @@ func TestTokenExchangeAndRefreshRotation(t *testing.T) {
 	}
 	if s.sessions.LookupAccess(access2) != nil {
 		t.Error("refresh reuse must invalidate the whole token family")
+	}
+}
+
+// redirect_uri in the token request is optional: OAuth 2.0 asked for it and
+// current clients often omit it. The code is already bound to the redirect_uri
+// that was validated at /authorize time.
+func TestTokenExchangeWithoutRedirectURI(t *testing.T) {
+	s, h := newOAuthServer(t)
+	redirect := "https://claude.ai/cb"
+	c := s.sessions.RegisterClient("Claude", []string{redirect})
+	verifier, challenge := pkce()
+	code := s.sessions.NewCode("andreas", c.ID, redirect, challenge, time.Minute)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, postForm("/token", url.Values{
+		"grant_type": {"authorization_code"}, "code": {code},
+		"client_id": {c.ID}, "code_verifier": {verifier},
+	}))
+	if rec.Code != 200 {
+		t.Fatalf("token exchange without redirect_uri must succeed, got %d: %s", rec.Code, rec.Body)
+	}
+
+	// A redirect_uri that is present but wrong is still refused.
+	code2 := s.sessions.NewCode("andreas", c.ID, redirect, challenge, time.Minute)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, postForm("/token", url.Values{
+		"grant_type": {"authorization_code"}, "code": {code2},
+		"client_id": {c.ID}, "redirect_uri": {"https://evil.example.com/cb"},
+		"code_verifier": {verifier},
+	}))
+	if rec.Code != 400 {
+		t.Errorf("a mismatched redirect_uri must still be refused, got %d", rec.Code)
+	}
+}
+
+func TestTokenFailureIsLogged(t *testing.T) {
+	cfg := mustConfig(t, oauthConf(t))
+	s := NewServer(cfg)
+	buf := &bytes.Buffer{}
+	prevOut := logOut
+	logOut = buf
+	defer func() { logOut = prevOut }()
+
+	rec := httptest.NewRecorder()
+	s.routes().ServeHTTP(rec, postForm("/token", url.Values{
+		"grant_type": {"authorization_code"}, "code": {"nonsense"},
+		"client_id": {"cid"}, "code_verifier": {randToken(48)},
+	}))
+	if rec.Code != 400 {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+	if !strings.Contains(buf.String(), `"event":"token_failed"`) {
+		t.Errorf("a failed token exchange must leave a log line: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "already used") {
+		t.Errorf("the log line should say why: %s", buf.String())
 	}
 }
 
@@ -352,17 +437,57 @@ func TestMCPInitializeAndToolsList(t *testing.T) {
 	}
 }
 
-func TestMCPRejectsForeignOrigin(t *testing.T) {
-	s, h := newOAuthServer(t)
-	access, _ := s.sessions.IssueTokens("andreas", "cid", "", time.Hour)
+// A hosted MCP client sends its own Origin. Refusing every foreign Origin by
+// default made /mcp unusable for exactly the clients aegis exists to serve,
+// so the restriction is opt-in.
+func TestOriginPolicy(t *testing.T) {
+	call := func(t *testing.T, yaml, origin string) int {
+		t.Helper()
+		cfg := mustConfig(t, yaml)
+		s := NewServer(cfg)
+		prevOut := logOut
+		logOut = &bytes.Buffer{}
+		defer func() { logOut = prevOut }()
 
-	req := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
-	req.Header.Set("Authorization", "Bearer "+access)
-	req.Header.Set("Origin", "https://evil.example.com")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != 403 {
-		t.Errorf("a foreign Origin must be refused, got %d", rec.Code)
+		access, _ := s.sessions.IssueTokens("andreas", "cid", "", time.Hour)
+		req := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+		req.Header.Set("Authorization", "Bearer "+access)
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rec := httptest.NewRecorder()
+		s.routes().ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	open := oauthConf(t)
+	if got := call(t, open, "https://claude.ai"); got != 200 {
+		t.Errorf("without allowed_origins a foreign Origin must pass, got %d", got)
+	}
+	if got := call(t, open, ""); got != 200 {
+		t.Errorf("no Origin at all must pass, got %d", got)
+	}
+
+	restricted := strings.Replace(open, `  code_ttl: "60s"`,
+		"  code_ttl: \"60s\"\n  allowed_origins: [\"https://claude.ai\"]", 1)
+	if got := call(t, restricted, "https://claude.ai"); got != 200 {
+		t.Errorf("a listed Origin must pass, got %d", got)
+	}
+	if got := call(t, restricted, "https://evil.example.com"); got != 403 {
+		t.Errorf("with allowed_origins set, an unlisted Origin must be refused, got %d", got)
+	}
+	// The server's own origin is always acceptable.
+	if got := call(t, restricted, "https://aegis.test"); got != 200 {
+		t.Errorf("the issuer origin must always pass, got %d", got)
+	}
+}
+
+func TestAllowedOriginsValidation(t *testing.T) {
+	base := oauthConf(t)
+	bad := strings.Replace(base, `  code_ttl: "60s"`,
+		"  code_ttl: \"60s\"\n  allowed_origins: [\"not an origin\"]", 1)
+	if _, err := ParseConfig([]byte(bad)); err == nil {
+		t.Error("a malformed origin must be rejected at load time")
 	}
 }
 
