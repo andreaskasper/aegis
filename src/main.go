@@ -72,6 +72,11 @@ func (s *Server) routes() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+	// The icon is what an MCP client shows next to the connector, so serve it
+	// under every name a browser or client might ask for.
+	mux.HandleFunc("/favicon.ico", serveFavicon)
+	mux.HandleFunc("/favicon.png", serveFavicon)
+	mux.HandleFunc("/logo.png", serveFavicon)
 	mux.HandleFunc("/.well-known/oauth-protected-resource", s.handleProtectedResource)
 	mux.HandleFunc("/.well-known/oauth-protected-resource/mcp", s.handleProtectedResource)
 	mux.HandleFunc("/.well-known/oauth-authorization-server", s.handleAuthServerMetadata)
@@ -280,6 +285,9 @@ func cmdValidate(path string) int {
 	fmt.Printf("%s: OK\n", path)
 	fmt.Printf("  public_url: %s\n", cfg.Issuer())
 	fmt.Printf("  listen:     %s\n", cfg.Listen)
+	if len(cfg.AllowedOrigins) > 0 {
+		fmt.Printf("  origins:    %s\n", strings.Join(cfg.AllowedOrigins, ", "))
+	}
 	for _, name := range sortedUserNames(cfg) {
 		u := cfg.Users[name]
 		fmt.Printf("\n  user %s (allow_any=%v)\n", u.Name, u.AllowAny)
