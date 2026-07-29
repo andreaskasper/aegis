@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.23"
+  GO_VERSION: "1.26"
 
 jobs:
   # ---------------------------------------------------------------------
@@ -121,19 +121,34 @@ jobs:
           echo "invalid config correctly rejected"
 
   # ---------------------------------------------------------------------
-  # Known vulnerabilities in dependencies. A tool whose job is protecting
-  # credentials should fail loudly here rather than warn.
+  # Known vulnerabilities in dependencies and in the standard library.
+  # A tool whose job is protecting credentials should fail loudly here
+  # rather than warn.
+  #
+  # Run as plain steps rather than through golang/govulncheck-action: the
+  # action's inputs are easy to get wrong, it brings its own checkout and
+  # setup-go that do not know about src/, and pinning the Go version here
+  # is what keeps the standard-library findings meaningful.
   # ---------------------------------------------------------------------
   vulncheck:
     name: Vulnerability scan
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
     steps:
       - uses: actions/checkout@v4
-      - uses: golang/govulncheck-action@v1
+
+      - uses: actions/setup-go@v5
         with:
-          go-version-input: ${{ env.GO_VERSION }}
-          work-dir: src
-          package: ./...
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: src/go.sum
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Scan
+        run: govulncheck ./...
 
   # ---------------------------------------------------------------------
   # The image has to build, and the binary inside it has to run.
@@ -178,7 +193,7 @@ jobs:
           docker run --rm -v "$RUNNER_TEMP/config.yaml:/etc/aegis/config.yaml:ro" \
             aegis:ci validate /etc/aegis/config.yaml
 
-      - name: Start the container and check /healthz
+      - name: Start the container and check it answers
         run: |
           docker run -d --name aegis-ci -p 2019:2019 \
             -v "$RUNNER_TEMP/config.yaml:/etc/aegis/config.yaml:ro" \
@@ -194,6 +209,15 @@ jobs:
           done
           curl -fsS http://localhost:2019/healthz
           curl -fsS http://localhost:2019/.well-known/oauth-authorization-server | grep -q '"issuer"'
+
+          # The embedded icon must be served: MCP clients use it for the
+          # connector, and a missing one is a silent regression.
+          type="$(curl -fsS -o /dev/null -w '%{content_type}' http://localhost:2019/favicon.ico)"
+          if [ "$type" != "image/png" ]; then
+            echo "::error::/favicon.ico returned $type, expected image/png"
+            exit 1
+          fi
+
           # Unauthenticated MCP access must be refused.
           code="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:2019/mcp -d '{}')"
           if [ "$code" != "401" ]; then
@@ -201,7 +225,15 @@ jobs:
             docker logs aegis-ci
             exit 1
           fi
-          echo "unauthenticated /mcp correctly refused"
+
+          # ...but a foreign Origin must not be, or hosted clients break.
+          code="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:2019/mcp \
+            -H 'Origin: https://claude.ai' -d '{}')"
+          if [ "$code" = "403" ]; then
+            echo "::error::a foreign Origin was refused without allowed_origins set"
+            exit 1
+          fi
+          echo "origin policy and auth behave as expected"
 
       - name: Container logs
         if: always()

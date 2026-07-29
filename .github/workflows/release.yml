@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26"
           cache-dependency-path: src/go.sum
       - run: go vet ./...
       - run: go test -race -count=1 ./...
@@ -76,6 +76,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # We set :latest ourselves below; without this the action adds its
+          # own and the build command carries the tag twice.
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
