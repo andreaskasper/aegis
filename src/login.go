@@ -96,8 +96,8 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// A stale token means the form was submitted twice, or the client
 		// restarted the flow behind the user's back. The PKCE challenge is
-		// not ours to invent, so we cannot simply re-issue a usable form:
-		// say plainly what happened and where to restart.
+		// not ours to invent, so we cannot re-issue a usable form: say
+		// plainly what happened and where to restart.
 		logWarn("login_stale_form", map[string]any{"client_id": clientID, "ip": clientIP(r)})
 		renderError(w, http.StatusBadRequest,
 			"This login form is no longer valid - it was already used, or the client started a new "+
@@ -180,30 +180,61 @@ type loginView struct {
 	RedirectURI string
 	CSRF        string
 	Error       string
+	Nonce       string
 }
 
-func securityHeaders(w http.ResponseWriter) {
+// originOf reduces a redirect URI to its scheme and authority, which is what
+// belongs in form-action.
+func originOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// securityHeaders locks the page down. formAction is the origin the login form
+// is allowed to end up at.
+//
+// This one is worth reading twice. form-action does not only constrain where a
+// form posts to - browsers also apply it to the redirect that follows the
+// submission. With a bare 'self' the POST to /authorize succeeds, aegis answers
+// 302 to the client's callback, and the browser silently refuses to follow it:
+// the user clicks Sign in and nothing happens at all. So the client's redirect
+// origin has to be named here.
+func securityHeaders(w http.ResponseWriter, nonce, formAction string) {
+	action := "'self'"
+	if formAction != "" {
+		action += " " + formAction
+	}
+	csp := "default-src 'none'; img-src 'self'; " +
+		"style-src 'nonce-" + nonce + "'; script-src 'nonce-" + nonce + "'; " +
+		"form-action " + action + "; frame-ancestors 'none'; base-uri 'none'"
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	// img-src 'self' is needed for the embedded mark; everything else stays
-	// shut, and there is no script on this page at all.
-	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", csp)
 }
 
 func renderLogin(w http.ResponseWriter, status int, v loginView) {
-	securityHeaders(w)
+	v.Nonce = randToken(16)
+	securityHeaders(w, v.Nonce, originOf(v.RedirectURI))
 	w.WriteHeader(status)
 	loginTemplate.Execute(w, v)
 }
 
 func renderError(w http.ResponseWriter, status int, msg string) {
-	securityHeaders(w)
+	nonce := randToken(16)
+	// No form on this page, so nothing may be submitted from it.
+	securityHeaders(w, nonce, "")
 	w.WriteHeader(status)
-	errorTemplate.Execute(w, msg)
+	errorTemplate.Execute(w, struct {
+		Message string
+		Nonce   string
+	}{msg, nonce})
 }
 
 const pageCSS = `
@@ -222,8 +253,14 @@ input { width:100%; padding:10px 12px; margin:0 0 16px; border:1px solid #d4d7dd
   border-radius:8px; font-size:15px; background:#fff; color:inherit; }
 input:focus { outline:2px solid #2563eb; outline-offset:-1px; border-color:transparent; }
 button { width:100%; padding:11px; border:0; border-radius:8px; background:#16181d;
-  color:#fff; font-size:15px; font-weight:500; cursor:pointer; }
+  color:#fff; font-size:15px; font-weight:500; cursor:pointer;
+  display:inline-flex; align-items:center; justify-content:center; gap:9px; }
 button:hover { background:#2d3139; }
+button[disabled] { opacity:.7; cursor:default; }
+.spin { width:15px; height:15px; border:2px solid currentColor; border-right-color:transparent;
+  border-radius:50%; animation:spin .7s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration:2s; } }
 .err { background:#fef2f2; border:1px solid #fecaca; color:#991b1b;
   padding:10px 12px; border-radius:8px; margin:0 0 20px; font-size:13px; text-align:center; }
 .foot { margin:24px 0 0; padding-top:16px; border-top:1px solid #eceef1;
@@ -244,13 +281,13 @@ var loginTemplate = template.Must(template.New("login").Parse(`<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign in - aegis</title>
 <link rel="icon" type="image/png" href="/favicon.png">
-<style>` + pageCSS + `</style></head>
+<style nonce="{{.Nonce}}">` + pageCSS + `</style></head>
 <body><main class="card">
 <img class="mark" src="/favicon.png" alt="" width="56" height="56">
 <h1>aegis</h1>
 <p class="sub">{{if .ClientName}}<strong>{{.ClientName}}</strong> is requesting access on your behalf.{{else}}Sign in to continue.{{end}}</p>
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
-<form method="post" action="/authorize">
+<form method="post" action="/authorize" id="f">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <input type="hidden" name="client_id" value="{{.ClientID}}">
   <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
@@ -260,9 +297,26 @@ var loginTemplate = template.Must(template.New("login").Parse(`<!DOCTYPE html>
   <label for="p">Password</label>
   <input id="p" name="password" type="password" autocomplete="current-password"
          enterkeyhint="go" required>
-  <button type="submit">Sign in</button>
+  <button type="submit" id="b">Sign in</button>
 </form>
 <p class="foot">Your credentials are never shared with the client.</p>
+<script nonce="{{.Nonce}}">
+(function () {
+  var f = document.getElementById("f"), b = document.getElementById("b");
+  f.addEventListener("submit", function () {
+    // Disable on the next tick: the browser has collected the form data by
+    // then, and a button disabled too early can cancel the submission.
+    setTimeout(function () {
+      b.disabled = true;
+      b.textContent = "";
+      var s = document.createElement("span");
+      s.className = "spin";
+      b.appendChild(s);
+      b.appendChild(document.createTextNode("Signing in…"));
+    }, 0);
+  });
+})();
+</script>
 </main></body></html>`))
 
 var errorTemplate = template.Must(template.New("error").Parse(`<!DOCTYPE html>
@@ -270,10 +324,10 @@ var errorTemplate = template.Must(template.New("error").Parse(`<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Error - aegis</title>
 <link rel="icon" type="image/png" href="/favicon.png">
-<style>` + pageCSS + `</style></head>
+<style nonce="{{.Nonce}}">` + pageCSS + `</style></head>
 <body><main class="card">
 <img class="mark" src="/favicon.png" alt="" width="56" height="56">
 <h1>aegis</h1>
 <p class="sub">Authorization could not continue.</p>
-<div class="err">{{.}}</div>
+<div class="err">{{.Message}}</div>
 </main></body></html>`))
