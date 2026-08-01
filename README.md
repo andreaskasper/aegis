@@ -11,6 +11,7 @@ those requests are authenticated with.
 ![Commit Activity](https://img.shields.io/github/commit-activity/m/andreaskasper/aegis.svg)
 [![Issues](https://img.shields.io/github/issues/andreaskasper/aegis.svg)](https://github.com/andreaskasper/aegis/issues)
 ![Repo Size](https://img.shields.io/github/repo-size/andreaskasper/aegis.svg)
+[![Docker Pulls](https://img.shields.io/docker/pulls/andreaskasper/aegis.svg)](https://hub.docker.com/r/andreaskasper/aegis)
 ![Stars](https://img.shields.io/github/stars/andreaskasper/aegis.svg?style=social)
 
 ---
@@ -42,6 +43,25 @@ is allowed, adds the credentials on the way out, strips them on the way back.
 - **Config:** a single `config.yaml`, hot-reloaded
 - **State:** in memory only — nothing is persisted, ever
 
+## Where to get it
+
+The image is published to two registries from the same build, with the same
+digest and the same tags. Neither is a mirror of the other; pick whichever you
+already trust.
+
+| Registry                  | Image                          |
+| ------------------------- | ------------------------------ |
+| GitHub Container Registry | `ghcr.io/andreaskasper/aegis`  |
+| Docker Hub                | `andreaskasper/aegis`          |
+
+`linux/amd64` and `linux/arm64`, with an SBOM and a signed
+[build provenance attestation](https://github.com/andreaskasper/aegis/attestations)
+on every release.
+
+The examples below use the ghcr.io address throughout — a compose file can only
+pull one, and printing both would make them ambiguous rather than helpful.
+Substitute `andreaskasper/aegis` anywhere you see it if you prefer Docker Hub.
+
 ## Quick start
 
 ```bash
@@ -56,6 +76,7 @@ Or with Compose:
 ```yaml
 services:
   aegis:
+    # or: andreaskasper/aegis:latest
     image: ghcr.io/andreaskasper/aegis:latest
     ports: ["2019:2019"]
     volumes:
@@ -71,6 +92,19 @@ browser, and you sign in with a user from your `config.yaml`.
 
 Aegis speaks plain HTTP and does **not** terminate TLS. Put it behind a reverse
 proxy (Traefik, Caddy, nginx, Cloudflare) in production.
+
+### Image tags
+
+| Tag           | Points at                               |
+| ------------- | --------------------------------------- |
+| `latest`      | the most recent release                 |
+| `0.1.6`       | that exact release                      |
+| `0.1`         | the newest patch of that minor          |
+| `edge`        | current `main`, rebuilt on every commit |
+| `sha-1a2b3c4` | one exact commit                        |
+
+`edge` is built from every push to `main`. It is where a fix lands first, and
+also where a mistake lands first — pin a release for anything you care about.
 
 ## Configuration
 
@@ -275,9 +309,11 @@ One JSON line per request on stdout:
 ```
 .
 ├── Dockerfile
+├── .dockerignore
 ├── docker-compose.yml
 ├── config.example.yaml
 ├── README.md
+├── .docker/README.md         # the Docker Hub overview
 ├── projektbeschreibung.md    # what and why
 ├── spezifikation.md          # the full spec
 └── src/
