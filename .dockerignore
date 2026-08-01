@@ -1,0 +1,33 @@
+# The Dockerfile copies src/ and nothing else. Everything listed here would
+# otherwise be uploaded into the build context on every build for no reason -
+# and in the case of a local config.yaml or .env, for a bad reason.
+
+.git
+.gitattributes
+.gitignore
+.github
+
+# Documentation and the published site. 1.35 MB of favicon lives here; the
+# icon the binary actually serves is embedded under src/.
+docs
+deploy
+*.md
+LICENSE
+favicon.png
+favicon_128.png
+
+# Real configuration must never come near the build context. The example is
+# not needed either - the image ships no config, it expects a mount.
+config.yaml
+config.*.yaml
+.env
+.env.*
+
+# Describes how to run the image, not how to build it.
+docker-compose.yml
+docker-compose.*.yml
+
+# Build and test leftovers
+src/coverage.out
+**/*.test
+**/*.out
