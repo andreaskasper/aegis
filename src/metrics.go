@@ -45,16 +45,16 @@ const (
 // one of them would shadow it, and the symptom - a health check that suddenly
 // wants a bearer token - looks nothing like the mistake that caused it.
 var reservedMetricsPaths = map[string]bool{
-	"/":                                       true,
-	"/healthz":                                true,
-	"/mcp":                                    true,
-	"/token":                                  true,
-	"/register":                               true,
-	"/authorize":                              true,
-	"/favicon.ico":                            true,
-	"/favicon.png":                            true,
-	"/logo.png":                               true,
-	"/.well-known/oauth-protected-resource":   true,
+	"/":                                     true,
+	"/healthz":                              true,
+	"/mcp":                                  true,
+	"/token":                                true,
+	"/register":                             true,
+	"/authorize":                            true,
+	"/favicon.ico":                          true,
+	"/favicon.png":                          true,
+	"/logo.png":                             true,
+	"/.well-known/oauth-protected-resource": true,
 	"/.well-known/oauth-authorization-server": true,
 }
 
