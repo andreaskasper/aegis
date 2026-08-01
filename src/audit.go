@@ -91,6 +91,10 @@ type AuditRecord struct {
 }
 
 func (a AuditRecord) emit() {
+	// The single choke point for proxied requests, so the single place the
+	// counters need touching.
+	metricsReg.observe(a)
+
 	f := map[string]any{
 		"user":        a.User,
 		"method":      a.Method,
