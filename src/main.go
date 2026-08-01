@@ -38,6 +38,11 @@ type Server struct {
 
 	loginLimiter    *KeyedLimiter
 	registerLimiter *KeyedLimiter
+	metricsLimiter  *KeyedLimiter
+
+	// metrics is the process-wide registry. Built once, never swapped: a
+	// counter that reset on config reload would be a lie.
+	metrics *metricsRegistry
 }
 
 func (s *Server) Config() *Config     { return s.cfg.Load() }
@@ -53,6 +58,8 @@ func NewServer(cfg *Config) *Server {
 	s.loginLimiter = NewKeyedLimiter(cfg.LoginRateLimit)
 	registerRate, _ := ParseRate("20/h")
 	s.registerLimiter = NewKeyedLimiter(registerRate)
+	s.metricsLimiter = NewKeyedLimiter(metricsRate(cfg))
+	s.metrics = metricsReg
 
 	s.transport = &http.Transport{
 		DialContext:           guardedDialer(10 * time.Second),
@@ -85,6 +92,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/authorize", s.handleAuthorize)
 	mux.HandleFunc("/token", s.handleToken)
 	mux.HandleFunc("/mcp", s.handleMCP)
+	// Registered only when configured, so a disabled endpoint is a genuine
+	// 404. routes() runs once, which is why turning metrics on is a restart
+	// rather than a reload.
+	if p := metricsPath(s.Config()); p != "" {
+		mux.HandleFunc(p, s.handleMetrics)
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			writeHTTPError(w, http.StatusNotFound, "not found")
@@ -151,6 +164,11 @@ Environment:
   AEGIS_LISTEN      listen address (default :2019)
   AEGIS_PUBLIC_URL  external base URL, required
   AEGIS_LOG_LEVEL   debug|info|warn|error
+
+Metrics (off unless enabled):
+  AEGIS_METRICS       1|true|yes to expose the Prometheus endpoint
+  AEGIS_METRICS_PATH  where to mount it (default /metrics)
+  AEGIS_METRICS_KEY   shared key a scraper must present, 16 characters or more
 `)
 }
 
@@ -287,6 +305,9 @@ func cmdValidate(path string) int {
 	fmt.Printf("  listen:     %s\n", cfg.Listen)
 	if len(cfg.AllowedOrigins) > 0 {
 		fmt.Printf("  origins:    %s\n", strings.Join(cfg.AllowedOrigins, ", "))
+	}
+	if cfg.Metrics != nil {
+		fmt.Printf("  metrics:    %s (key set, %s)\n", cfg.Metrics.Path, cfg.Metrics.RateLimit.Source)
 	}
 	for _, name := range sortedUserNames(cfg) {
 		u := cfg.Users[name]
