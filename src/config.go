@@ -24,14 +24,15 @@ type rawConfig struct {
 }
 
 type rawServer struct {
-	Listen           string   `yaml:"listen"`
-	PublicURL        string   `yaml:"public_url"`
-	MaxResponseBytes int64    `yaml:"max_response_bytes"`
-	RequestTimeout   string   `yaml:"request_timeout"`
-	TokenTTL         string   `yaml:"token_ttl"`
-	CodeTTL          string   `yaml:"code_ttl"`
-	LoginRateLimit   string   `yaml:"login_rate_limit"`
-	AllowedOrigins   []string `yaml:"allowed_origins"`
+	Listen           string      `yaml:"listen"`
+	PublicURL        string      `yaml:"public_url"`
+	MaxResponseBytes int64       `yaml:"max_response_bytes"`
+	RequestTimeout   string      `yaml:"request_timeout"`
+	TokenTTL         string      `yaml:"token_ttl"`
+	CodeTTL          string      `yaml:"code_ttl"`
+	LoginRateLimit   string      `yaml:"login_rate_limit"`
+	AllowedOrigins   []string    `yaml:"allowed_origins"`
+	Metrics          *rawMetrics `yaml:"metrics"`
 }
 
 type rawUser struct {
@@ -80,6 +81,10 @@ type Config struct {
 	// and refusing foreign Origins on a public host breaks hosted MCP clients
 	// without buying much.
 	AllowedOrigins []string
+
+	// Metrics is nil when the Prometheus endpoint is off, which is the
+	// default. See metrics.go.
+	Metrics *MetricsConfig
 
 	Users map[string]*User // keyed by name
 }
@@ -238,6 +243,9 @@ func ParseConfig(data []byte) (*Config, error) {
 		}
 		cfg.AllowedOrigins = append(cfg.AllowedOrigins, o)
 	}
+
+	// --- metrics ------------------------------------------------------
+	cfg.Metrics = buildMetrics(raw.Server.Metrics, fail)
 
 	// --- users --------------------------------------------------------
 	if len(raw.Users) == 0 {
