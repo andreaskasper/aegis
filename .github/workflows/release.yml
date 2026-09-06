@@ -186,7 +186,11 @@ jobs:
   release:
     name: GitHub release
     needs: publish
-    if: github.ref_type == 'tag'
+    # A weekly rebuild is dispatched on the release tag so that `latest` picks
+    # up base-image patches. That dispatch must not try to cut the release a
+    # second time: `gh release create` fails on a tag that already has one,
+    # and both the primary call and its `||` fallback would go red.
+    if: github.ref_type == 'tag' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
